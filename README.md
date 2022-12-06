@@ -1,1 +1,1 @@
-# These scripts were used to process blood sample data.
+# These scripts were used to determine the Amyloid Probability Score of blood samples.
