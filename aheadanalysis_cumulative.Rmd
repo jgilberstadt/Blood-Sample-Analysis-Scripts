@@ -1,0 +1,1396 @@
+---
+title: "Quality Assurance Survey - Interim Unaudited Analysis"
+author: "C2N Diagnostics - proprietary and confidential information. Not to be copied or distributed without C2N written consent."
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+
+now <<- Sys.time()
+
+library(rmarkdown)
+library(ggplot2)
+library(pROC)
+library(data.table)
+library(caret)
+library(plyr)
+library(dplyr)
+library(ggpubr)
+library(expss)
+library(ggforce)
+library(gridExtra)
+# visualizing the effects of variables in a GLM
+library(effects)
+library(Matrix)
+
+# For nicer looking html tables
+library(formattable)
+library(readxl)
+
+# For summary tables
+library(qwraps2)
+options(qwraps2_markup = "markdown")
+
+library(DiagrammeR)
+#http://rich-iannone.github.io/DiagrammeR/graphviz_and_mermaid.html
+#https://bookdown.org/yihui/rmarkdown-cookbook/diagrams.html
+
+
+
+
+# Plot & visualization
+theme_new <- function(base_size = 12, base_family = ""){
+  theme_bw(base_size = base_size, base_family = base_family) %+replace%
+    theme(
+      legend.key=element_rect(colour=NA, fill =NA),
+      panel.grid = element_blank(),   
+      panel.border = element_rect(fill = NA, colour = "black", size=1),
+      panel.background = element_rect(fill = "white", colour = "black"), 
+      strip.background = element_rect(fill = NA)
+    )
+}
+
+theme_set(theme_new(base_size = 16))
+
+
+printpct = function(percentage) {
+  percentage = as.numeric(percentage)
+  
+  if (is.na(percentage) | percentage == 0)
+    return("-")
+  else
+    return(paste0(percentage, "%"))
+}
+
+categorize_aps = function (APS) {
+  
+  if (is.na(APS)) {
+    return(NA)
+  }
+  
+  if (APS <= 35) {
+    return("Low")
+  } else if (APS >= 58) {
+    return("High")
+  } else {
+    return("Intermediate")
+  }
+  
+}
+```
+
+
+# Put data together
+
+
+```{r}
+
+
+## date given as number of days since 1900-01-01 (a date in 1989)
+##  as.Date(32768, origin = "1900-01-01")
+## Excel is said to use 1900-01-01 as day 1 (Windows default) or
+## 1904-01-01 as day 0 (Mac default), but this is complicated by Excel
+## incorrectly treating 1900 as a leap year.
+## So for dates (post-1901) from Windows Excel:
+##  as.Date(35981, origin = "1899-12-30") # 1998-07-05
+
+
+getDateFromExcel = function (datestring) {
+  
+  converteddate = NA
+  
+  if(is.na(as.numeric(datestring))) {
+    # the date is a string not a number
+    converteddate = as.Date(datestring, tryFormats = c("%d%b%Y"))
+    
+  } else {
+    # the date is stoed as Excel date - which is converted to a number when casta s text
+    converteddate = as.Date(as.numeric(datestring), origin = "1899-12-30")
+    
+  }
+  
+  return(as.character(converteddate))
+  
+}
+
+#dateastext = read_xlsx(paste0("cumulativefiles/All Abeta Data_", dateoffile, ".xlsx"), 
+#                      col_types = c("text", "numeric", "numeric", "text", "text", "text", "numeric", "text", "numeric", "date"))
+#
+#dateastext$converteddate = sapply(dateastext$`Date of collection`, getDateFromExcel)
+#dateastext$converteddate = as.Date(dateastext$converteddate)
+#
+#dateastext[which(dateastext$`Batch#` == 38), c("Plasma Barcodes", "Date of collection", "converteddate")]
+
+```
+
+## Date conversions for the most recent batch:
+
+```{r}
+
+# JOSH CHANGE THE DATE TO THE DATE IN THE FILENAME LIKE
+# All Abeta Data_23MAR2022.xlsx
+dateoffile = "02DEC2022"
+
+# Read Abeta file and force column types
+abetadata = read_xlsx(paste0("cumulativefiles/All Abeta Data_", dateoffile, ".xlsx"), 
+                      col_types = c("text", "numeric", "numeric", "text", "text", "text", "numeric", "text", "numeric", "date"))
+
+abetadata$converteddate = sapply(abetadata$`Date of collection`, getDateFromExcel)
+abetadata$converteddate = as.Date(abetadata$converteddate)
+
+
+
+# Read ApoE file and force column types
+apoedata  = read_excel(paste0("cumulativefiles/All ApoE Data_", dateoffile, ".xlsx"),
+                       col_types = c("text", "text", "text"))
+
+# Rename columns per DTA
+
+colnames(abetadata) = c("LBREFID", "Abeta40_Plasma_IPMS", "Abeta42_Plasma_IPMS", "Abeta4240_Plasma_IPMS_excel", "Abeta_comment", "LBDTC_excel", "YOB", "USUBJID_s", "batch", "rundate", "LBDTC")
+colnames(apoedata) = c("LBREFID", "Proteotype", "ApoE_comment")
+
+paged_table(abetadata[which(abetadata$batch == max(abetadata$batch)), c("LBREFID", "LBDTC_excel", "LBDTC")])
+
+
+```
+
+## Samples in cumulative file that has USUBJID_s but does not have LBDTC_excel
+
+```{r}
+
+paged_table(abetadata[which(!is.na(abetadata$USUBJID_s) & is.na(abetadata$LBDTC_excel)), c("LBREFID", "LBDTC_excel", "USUBJID_s")])
+
+
+```
+
+
+
+## Data points per batch
+
+Abeta
+
+```{r}
+
+table(abetadata$batch)
+
+```
+
+
+
+
+
+
+## Number of unique sample identifiers
+
+Abeta file and ApoE file unique IDs:
+
+```{r}
+
+length(unique(abetadata$LBREFID))
+length(unique(apoedata$LBREFID))
+
+```
+
+
+```{r}
+
+if (length(unique(abetadata$LBREFID)) != length(abetadata$LBREFID)) {
+  
+  print(paste0("The number of unique LBREFIDs (", length(unique(abetadata$LBREFID)), ") is not the same as the number of data points (", length(abetadata$LBREFID), ")"))
+#  print(paste0("Before we merge the data we must take out any duplicate genotype data"))
+#  apoedata = apoedata[!duplicated(apoedata), ]
+  print("The following batches contain duplicated LBREFIDs: ")
+
+  print(unique(abetadata[duplicated(abetadata$LBREFID), c("LBREFID", "LBDTC", "batch")]))
+  print(unique(abetadata[duplicated(abetadata$LBREFID, fromLast = T), c("LBREFID", "LBDTC", "batch")]))
+  
+  knitr::knit_exit()
+  
+} else {
+  
+  print("No duplicate LBREFIDs")
+  
+}
+
+
+
+```
+
+## Merge data
+
+Merge the Abeta and ApoE data
+
+```{r}
+
+entries = length(abetadata$LBREFID)
+
+study139data.c2n = merge(abetadata, apoedata)
+
+if (entries != length(study139data.c2n$LBREFID)) {
+  print("Merge of data failed!")
+  
+  print(paste0("Samples in Abeta not in ApoE: ", setdiff(abetadata$LBREFID, apoedata$LBREFID)))
+  print(paste0("Samples in ApoE not in Abeta: ", setdiff(apoedata$LBREFID, abetadata$LBREFID)))
+
+  knitr::knit_exit()
+  
+} else {
+  print("Merge successful!")
+  
+}
+
+```
+
+## Check on collection date and YOB for samples that come from sites
+
+For the purpose of this analysis, we assume that samples with SubjectID in file from Kris are samples that come direct from the site. Below is a list of direct from sie samples with no YOB or no collection date:
+
+```{r}
+directsamples = study139data.c2n[which(!is.na(study139data.c2n$USUBJID_s)), ]
+
+paste0("Number of direct from site samples: ", length(directsamples$LBREFID))
+
+formattable(directsamples[which(is.na(directsamples$YOB) | is.na(directsamples$LBDTC) ), c("LBREFID", "LBDTC", "YOB", "USUBJID_s", "batch")])
+
+```
+
+
+
+## Load the age data
+
+```{r}
+
+online = T
+
+
+if (online == F) {
+  # use downloaded file to load the data
+ study139data.atri = read.csv("agedata/A3-45_Participant_Age_20220112.csv", header = T)
+  
+} else {
+  # collect the file from the server
+  
+  token = "bf481d93f6d565391ab90304634016fdfac308be"
+
+  # Base URL for AHEAD server
+  baseurl = "https://a345.atrihub.org"
+  
+  # Setup the header for authentication
+  h = httr::add_headers(Authorization= paste0("Token ", token))
+  
+  # The topic code/directory for the files
+  topic_code = "transfer-c2n-outbound"
+  
+  # Generate the URL for directory listing
+  u = paste0(baseurl, "/public/api/v1/docs/topics/", topic_code, "/files/") 
+  
+  # Request the directory listing
+  out <- httr::GET(u, config = h)
+  
+  # Parse the file list
+  filelist <- httr::content(out, as = 'parsed')
+  
+  if (filelist$meta == 200) {
+    # We got a response 
+    
+    # NOT ordering by date anymore
+    # Pick the last file
+    #dates = data.frame("entry" = integer(), "date" = character())
+    
+    print(" ---------------------------------- ")
+    print("Directory listing: ")
+    
+    for (i in seq (1, length(filelist$data))) {
+      
+      # NOT ordering by date anymore
+      # 2022-02-09T03:07:46.431732Z
+      #datestring = filelist$data[i][[1]]$ts_last_modify
+      #date = as.Date(filelist$data[i][[1]]$ts_last_modify)
+      #date = as.POSIXct(datestring, tz = "UTC", "%Y-%m-%dT%H:%M:%OS")
+      #dates = rbind(dates, data.frame("entry" = i, "date" = date))
+      
+      #print(paste0("Date: ", date))
+      
+      print(paste0(" - ", filelist$data[i][[1]]$label, ", Date: ", filelist$data[i][[1]]$ts_last_modify))
+      
+      # Email from Jorge Coral, 9 FEB 2022:
+      # Please use the “A3-45 C2N Participant Age Listing” (without date in filename) file moving forward. We have set this report to run daily and therefore should always have the most recent information.
+      
+      if (filelist$data[i][[1]]$label == "A3-45 C2N Participant Age Listing") {
+        latestfile = i
+      }
+      
+    }
+    
+    # NOT ordering by date anymore
+    #latestfile = dates[order(dates$date, decreasing = T), "entry"][1]
+    
+    # Get the download URL
+    downloadurl  = filelist$data[latestfile][[1]]$latest_version$download_url
+    u = paste0(baseurl, downloadurl)
+    
+    #out <- httr::GET(u, config = h)
+    vector_header = c('Authorization'= paste('Token', token))
+    h = httr::add_headers(.headers=vector_header)
+    study139data.atri <- read.csv(url(u, headers = vector_header))
+    
+    # data is stored on AmazonS3 - so we need the redirect UTL  
+    #redirect_url <-out$url
+    # Download the data from S3
+    #study139data.atri <- read.csv(redirect_url)
+    
+    print(" ---------------------------------- ")
+    print(paste0("Downloaded file: ", filelist$data[latestfile][[1]]$label, ""))
+    print(paste0("Downloaded URL: ", u, ""))
+    print(paste0("Description : ", filelist$data[latestfile][[1]]$description, ""))
+    print(paste0("Date updated : ", filelist$data[latestfile][[1]]$ts_last_modify, ""))
+    print(" ---------------------------------- ")
+
+  } else {
+    paste0(filelist)
+    knitr::knit_exit()
+    
+  }  
+
+}
+
+
+colnames(study139data.atri) = c("USUBJID","LBREFID", "age")
+
+paste0("Number of participants in the file: ", length(unique(study139data.atri$LBREFID)))
+
+
+
+```
+
+Merge the C2N and ATRI data - keep all C2N data - discard ATRI data that does not line up with C2N data.
+
+```{r}
+study139data = merge(study139data.c2n, study139data.atri, by = c("LBREFID"),  all.x = T)
+
+study139data$LBSTAT   = ""
+study139data$LBREASND = ""  
+
+
+# Convert "N/A" to NA
+study139data$Abeta40_Plasma_IPMS[which(study139data$Abeta40_Plasma_IPMS == "N/A")] = NA
+study139data$Abeta42_Plasma_IPMS[which(study139data$Abeta42_Plasma_IPMS == "N/A")] = NA
+
+# Then convert to numbers and round to 3 decimals
+study139data$Abeta40_Plasma_IPMS = round(as.numeric(study139data$Abeta40_Plasma_IPMS), 3)
+study139data$Abeta42_Plasma_IPMS = round(as.numeric(study139data$Abeta42_Plasma_IPMS), 3)
+
+# TODO: setup a function that will do this
+study139data$Abeta4240_Plasma_IPMS = study139data$Abeta42_Plasma_IPMS / study139data$Abeta40_Plasma_IPMS
+
+# count apoE4 alleles
+study139data$apoe4copynr = 0
+study139data$apoe4copynr[is.na(study139data$Proteotype)] = NA
+study139data$apoe4copynr[study139data$Proteotype == "E2/E4"] = 1
+study139data$apoe4copynr[study139data$Proteotype == "E3/E4"] = 1
+study139data$apoe4copynr[study139data$Proteotype == "E4/E4"] = 2
+# E4 presence
+study139data$apoe4present = (study139data$apoe4copynr > 0)
+
+# count apoE2 alleles
+study139data$apoe2copynr = 0
+study139data$apoe2copynr[is.na(study139data$Proteotype)] = NA
+study139data$apoe2copynr[study139data$Proteotype == "E2/E2"] = 2
+study139data$apoe2copynr[study139data$Proteotype == "E2/E3"] = 1
+study139data$apoe2copynr[study139data$Proteotype == "E2/E4"] = 1
+# E2 presence
+study139data$apoe2present = (study139data$apoe2copynr > 0)
+
+
+
+
+```
+
+
+### Differences between age file and MS data
+
+#### Samples in the C2N set not ATRI set:
+
+
+LBREFIDs:
+
+(Just showing first 6)
+
+```{r}
+delta = sort(setdiff(study139data.c2n$LBREFID, study139data.atri$LBREFID))
+
+head(delta)
+
+```
+
+Number of samples:
+
+```{r}
+length(setdiff(study139data.c2n$LBREFID, study139data.atri$LBREFID))
+```
+
+Number of samples per batch:
+
+```{r}
+table(study139data.c2n[which(study139data.c2n$LBREFID %in% delta), c("batch")])
+```
+
+#### Samples in ATRI set not in C2N set:
+
+LBREFIDs:
+
+```{r}
+sort(setdiff(study139data.atri$LBREFID, study139data.c2n$LBREFID))
+```
+
+Number of samples:
+
+
+```{r}
+
+length(setdiff(study139data.atri$LBREFID, study139data.c2n$LBREFID))
+
+```
+
+## Copy over the subject IDs for direct from site samples
+
+Are there samples with a subject ID from both files?
+
+```{r}
+study139data[which(!is.na(study139data$USUBJID) & !is.na(study139data$USUBJID_s)), c("LBREFID", "USUBJID_s", "USUBJID", "LBDTC", "YOB", "age", "batch")]
+
+mismatches = length(study139data[which(!is.na(study139data$USUBJID) & !is.na(study139data$USUBJID_s) & study139data$USUBJID_s != study139data$USUBJID), c("LBREFID")])
+
+if (mismatches > 0) {
+  print("USUBJID does not match the USUBJID_s")
+  knitr::knit_exit()
+
+} else {
+  print("All USUBJID match USUBJID_s")
+  
+}
+
+```
+
+Copy USUBJID_s to USUBJID
+
+```{r}
+# copy the calculated age in to the age variable
+study139data[which(!is.na(study139data$USUBJID_s)), ]$USUBJID = study139data[which(!is.na(study139data$USUBJID_s)), ]$USUBJID_s
+```
+
+Empty USUBJID:
+
+```{r}
+table(is.na(study139data$USUBJID))
+```
+
+
+
+
+
+## Set visit
+
+Visit is set based on presence of USUBJID_s
+
+```{r}
+
+# Default is sc1
+study139data$VISIT = "sc1"
+
+# Direct from site
+study139data[which(!is.na(study139data$USUBJID_s)), ]$VISIT = "sc1a"
+
+table(study139data$VISIT)
+
+```
+
+
+## Calculate age
+
+For samples with collection date and year of birth -> calculate their age.
+
+Number of samples with no age data:
+
+```{r}
+
+length(study139data[which(is.na(study139data$age)), "LBREFID"])
+
+```
+
+Calculate age and copy to the age variable
+
+```{r}
+
+# Get year of collection adn year of birth
+study139data$calcage = as.numeric(format(study139data$LBDTC, "%Y")) - as.numeric(study139data$YOB)
+
+# copy the calculated age in to the age variable
+study139data[which(!is.na(study139data$calcage)), ]$age = study139data[which(!is.na(study139data$calcage)), ]$calcage
+
+paged_table(study139data[which(!is.na(study139data$calcage)), c("LBREFID", "age", "calcage", "batch")])
+
+```
+
+Number of samples with no age data:
+
+```{r}
+
+length(study139data[which(is.na(study139data$age)), "LBREFID"])
+
+```
+
+
+#### Age check
+
+```{r}
+
+ggplot(study139data, aes(x=age)) + 
+  geom_histogram(aes(y=..density..),fill="dodgerblue3",color="white",alpha=0.7, binwidth = 1) + 
+  geom_density() +
+  geom_rug() +
+  labs(x='Abeta4240_Plasma_IPMS') +
+  annotate("text", x=mean(study139data$age), y=0.02, label = paste0("mean = ", round(mean(study139data$age), 3))) +
+  theme_minimal()
+
+
+if (sum(as.numeric(study139data$age < 54), na.rm = T) > 0) {
+  
+  print("Some ages are too low!")
+  knitr::knit_exit()
+  
+} else {
+  
+  print("All ages are above or equal to 54")
+  
+}
+
+min(study139data$age, na.rm = T)
+
+```
+
+
+
+
+
+## Clean out any samples with comments
+
+```{r}
+study139data$Abeta_comment[which(study139data$Abeta_comment == "")] = NA
+study139data$ApoE_comment[which(study139data$ApoE_comment == "")] = NA
+```
+
+## Abeta comments:
+
+```{r}
+
+formattable(table(study139data$Abeta_comment))
+
+```
+
+### Keep only comments regarding sample volume - re-injected samples can be part of final analysis.
+
+```{r}
+
+study139data$Abeta_comment[which(study139data$Abeta_comment == "reinject due to poor peak shape")] = NA
+study139data$Abeta_comment[which(study139data$Abeta_comment == "reinjected due to poor peak shape")] = NA
+study139data$Abeta_comment[which(study139data$Abeta_comment == "Reinjected due to poor peak shape")] = NA
+study139data$Abeta_comment[which(study139data$Abeta_comment == "Contaminant present; mag bead clumping; Ion ratio failure on 1st injection; resolved on 2nd injection.")] = NA
+
+# clean up QNS
+study139data$Abeta_comment[which(study139data$Abeta_comment == "250 uL plasma")] = "QNS"
+study139data$Abeta_comment[which(study139data$Abeta_comment == "300 uL plasma")] = "QNS"
+study139data$Abeta_comment[which(study139data$Abeta_comment == "350 uL plasma")] = "QNS"
+study139data$Abeta_comment[which(study139data$Abeta_comment == "375 uL plasma")] = "QNS"
+study139data$Abeta_comment[which(study139data$Abeta_comment == "400 uL plasma")] = "QNS"
+study139data$Abeta_comment[which(study139data$Abeta_comment == "400 uL plasma; reinject due to poor peak shape")] = "QNS"
+study139data$Abeta_comment[which(study139data$Abeta_comment == "400 uL plasma; Reinjected due to poor peak shape")] = "QNS"
+
+
+
+formattable(table(study139data$Abeta_comment))
+
+sum(as.numeric(!is.na(study139data$Abeta_comment)))
+
+```
+
+Change "\u03b2" to "beta"
+
+```{r}
+
+study139data$Abeta_comment = gsub('\u03b2', 'beta', study139data$Abeta_comment)
+
+formattable(table(study139data$Abeta_comment))
+
+```
+
+
+
+
+## ApoE comments:
+
+```{r}
+
+formattable(table(study139data$ApoE_comment))
+
+```
+
+clean out the comment for "1E350551571":
+
+```{r}
+
+study139data[which(study139data$LBREFID == "1E350551571"), "ApoE_comment"] = NA
+
+formattable(table(study139data$ApoE_comment))
+
+```
+
+
+
+
+## Samples with comments = Not Done
+
+For all samples with sample comments:
+
+* Set the results to NA
+* Set status to ND
+
+Set the reason not done to a concatenation of Abeta and ApoE comments and then make sure that the reason not done it not longer than 200 characters as per the DTA.
+
+```{r}
+
+sampleswithqns = which(!is.na(study139data$Abeta_comment) | !is.na(study139data$ApoE_comment))
+
+paste0("Number of samples: ", length(study139data$LBREFID), ", samples with comments: ", length(sampleswithqns))
+
+study139data[sampleswithqns, c("Abeta40_Plasma_IPMS", "Abeta42_Plasma_IPMS", "Abeta4240_Plasma_IPMS", "Proteotype")] = NA
+
+# Set status and reason not done
+study139data[sampleswithqns, c("LBSTAT")] = "ND"
+
+
+# convert NA back to ""
+study139data$Abeta_comment[is.na(study139data$Abeta_comment)] = ""
+study139data$ApoE_comment[is.na(study139data$ApoE_comment)] = ""
+
+# use the comment as the reason not done
+study139data$LBREASND = paste(study139data$Abeta_comment, study139data$ApoE_comment, sep = "")
+
+# make sure that reason not done does not overflow the 200 characters
+study139data$LBREASND = substr(study139data$LBREASND,1,200)
+
+# Make sure we do not repeat QNS in the reason not done
+study139data$LBREASND <- gsub("QNSQNS", 'QNS', study139data$LBREASND)
+
+table(study139data$LBREASND)
+
+#study139data[sampleswithqns, c("LBREASND")] = "QNS"
+
+```
+
+## Duplicated subject IDs
+
+```{r}
+duplicateids = study139data[duplicated(study139data$USUBJID, fromLast = F), c("USUBJID")]
+duplicateids = unique(duplicateids)
+
+paste0("Number of duplicated subject IDs: ", length(duplicateids))
+```
+
+Duplicates are found in the following batches:
+
+```{r}
+alltogether = NULL
+
+subjectid = "AHD381-12261"
+
+for (subjectid in duplicateids) {
+
+  entries = study139data[which(study139data$USUBJID == subjectid), ]
+
+  if (is.null(alltogether)) {
+    alltogether = entries
+  } else {
+    alltogether = rbind(alltogether, entries)
+    
+  }
+
+}
+
+table(alltogether$batch)
+
+
+
+alltogether[which(alltogether$batch == 55), c("USUBJID", "LBREFID", "batch")]
+
+```
+
+### Duplicates in the latest batches
+
+```{r}
+
+subjids = alltogether[which(alltogether$batch >= (max(alltogether$batc)-2)), "USUBJID"]
+
+alltogether[which(alltogether$USUBJID %in% subjids), c("USUBJID", "LBREFID", "batch", "LBSTAT")]
+
+```
+
+
+
+
+
+### Deal with duplicate subject IDs algorithmically.
+
+
+
+
+
+#### Version 1
+
+1) For samples where one or more LBREFID is "SP" and the other is "1E" - remove the ones that start with "SP" if the 1E data status is not ND
+2) For samples where there are more than one SP entry and one entry is status ND - remove the ND entry
+3) For samples where there are more than one SP entry and none of them are ND - remove all but the earliest batch data for this patient
+
+other potential scenarios that are not covered:
+
+* a patient has two 1E data entries where one may be ND - i.e. repeat sampling sent from the site.
+* a patient has 1E data that is QNS/ND and a separate SP entry as a repeat sample is sent from ATRI.
+
+
+```{r}
+
+rowstoremove = list()
+
+subjectid = "AHD041-11453" # 2 SP
+subjectid = "AHD381-12427" # 1 1E and 1 SP
+
+duplicateids = unique(study139data[duplicated(study139data$USUBJID, fromLast = F), c("USUBJID")])
+
+for (subjectid in duplicateids) {
+
+  entries = study139data[which(study139data$USUBJID == subjectid), ]
+
+  entries.1e = entries[which(substr(entries$LBREFID, 1, 2) == "1E"), ]
+  entries.sp = entries[which(substr(entries$LBREFID, 1, 2) == "SP"), ]
+
+  # Do we have any good data in the SP or 1E samples?
+  gooddata.1e = (length(which(entries.1e$LBSTAT != "ND")) > 0)
+  gooddata.sp = (length(which(entries.sp$LBSTAT != "ND")) > 0)
+  
+  
+  if (gooddata.1e & length(entries.1e$LBREFID) == 1 & length(entries.sp$LBREFID) > 0) {
+    # A good 1E entry is present - remove all the SP entries
+    extrasps = which((study139data$USUBJID == subjectid) & (substr(study139data$LBREFID, 1, 2) == "SP"))
+    rowstoremove = c(extrasps, rowstoremove)
+    print(paste0("Remove SP entry(s) (", extrasps, ") for ", subjectid, " - patient has a good 1E entry also"))
+  
+  } else if (length(entries.sp$LBREFID) > 1) {
+    # More than one SP refid is present.
+
+    datawna = which((study139data$USUBJID == subjectid & study139data$LBSTAT == "ND"))
+    
+    #print(paste0("More than one SP entry(s) for ", subjectid, ": ", entries.sp$LBREFID))
+    
+    if (length(datawna) == 0) {
+      # all the entries have data - pick the first one
+      lowestbatch = min(study139data[which(study139data$USUBJID == subjectid), c("batch")])
+      
+      datanotlowestbatch = which((study139data$USUBJID == subjectid & study139data$batch != lowestbatch))
+      print(paste0("More than one SP entry(s) for ", subjectid, ": More than one has data! Keep just the first data, remove: ", datanotlowestbatch))
+
+      rowstoremove = c(datanotlowestbatch, rowstoremove)
+      
+    } else if(length(datawna) == length(entries.sp$LBREFID)-1) {
+      # remove the missing entries
+      rowstoremove = c(datawna, rowstoremove)
+      print(paste0("More than one SP entry(s) for ", subjectid, ": This one(s) have no data: ", datawna))
+    } else if (length(datawna) == length(entries.sp$LBREFID)) {
+      # remove the missing entries but keep one
+      rowstoremove = c(datawna[1:(length(datawna)-1)], rowstoremove)
+      print(paste0("More than one SP entry(s) for ", subjectid, ": None have no data! Remove: ", datawna[1:(length(datawna)-1)]))
+
+    } else {
+      print(paste0("No resolution for ", subjectid))
+      
+      
+    }
+    
+  } else {
+      print(paste0("No resolution for ", subjectid))
+    
+  }
+  
+}
+
+paste0("Number of entries to remove: ", length(rowstoremove))
+
+study139data.remove.duplicates = study139data[-unlist(rowstoremove), ]
+
+duplicateids = study139data.remove.duplicates[duplicated(study139data.remove.duplicates$USUBJID, fromLast = F), c("USUBJID")]
+
+```
+
+#### Version 2
+
+1) For samples where one good data is present for "1E" - remove all others
+2) For samples where there are more than one good entry - stick with the lowest batch data that is good.
+3) For samples where there are no good entry - stick with the highest batch data.
+
+
+
+```{r}
+
+rowstoremove = list()
+
+subjectid = "AHD041-11453" # 2 SP
+subjectid = "AHD381-12427" # 1 1E and 1 SP
+subjectid = "AHD381-12572" # 1 1E and 2 SP
+subjectid = "AHD029-12649" # 1 1E and 1 SP
+subjectid = "AHD127-12338" # 1 1E and 1 SP
+subjectid = "AHD029-12649" # 1 1E and 1 SP
+subjectid = "AHD127-12338" # 1 1E and 1 SP
+
+
+duplicateids = unique(study139data[duplicated(study139data$USUBJID, fromLast = F), c("USUBJID")])
+
+for (subjectid in duplicateids) {
+
+  entries = study139data[which(study139data$USUBJID == subjectid), ]
+
+  entries.1e = entries[which(substr(entries$LBREFID, 1, 2) == "1E"), ]
+  entries.sp = entries[which(substr(entries$LBREFID, 1, 2) == "SP"), ]
+
+  # Do we have any good data in the SP or 1E samples?
+  gooddata.1e = (length(which(entries.1e$LBSTAT != "ND")) > 0)
+  gooddata.sp = (length(which(entries.sp$LBSTAT != "ND")) > 0)
+  
+  
+  if (gooddata.1e & length(entries.1e$LBREFID) == 1) {
+    # A good 1E entry is present - remove all SP entries
+    extrasps = which((study139data$USUBJID == subjectid) & (substr(study139data$LBREFID, 1, 2) == "SP"))
+    rowstoremove = c(extrasps, rowstoremove)
+    print(paste0("1) ", subjectid, ": Remove SP entry(s) (", extrasps, ") - patient has a good 1E entry also"))
+  
+  } else if (gooddata.1e | gooddata.sp) {
+    # Find lowest batch number with good data
+    lowestbatch = min(study139data[which(study139data$USUBJID == subjectid & study139data$LBSTAT != "ND"), c("batch")])
+
+    datanotlowestbatch = which((study139data$USUBJID == subjectid & study139data$batch != lowestbatch))
+    print(paste0("2) ", subjectid, ": At least one has good data! Keep just the first good data, remove: ", datanotlowestbatch))
+    
+    rowstoremove = c(datanotlowestbatch, rowstoremove)
+    
+  } else {
+    # Find highest batch number
+    lowestbatch = max(study139data[which(study139data$USUBJID == subjectid), c("batch")])
+
+    datanothighestbatch = which((study139data$USUBJID == subjectid & study139data$batch != lowestbatch))
+    print(paste0("3) ", subjectid, ": None has good data! Keep the highest batch data, remove: ", datanothighestbatch))
+    
+    rowstoremove = c(datanothighestbatch, rowstoremove)
+
+    
+  }
+
+}
+
+paste0("Number of entries to remove: ", length(rowstoremove))
+
+study139data.remove.duplicates = study139data[-unlist(rowstoremove), ]
+
+duplicateids = study139data.remove.duplicates[duplicated(study139data.remove.duplicates$USUBJID, fromLast = F), c("USUBJID")]
+
+```
+
+
+
+
+### Removed entries
+
+```{r}
+
+paged_table(study139data[unlist(rowstoremove), ])
+
+```
+
+
+
+```{r}
+paste0("Number of duplicated subject IDs: ", length(duplicateids))
+
+uniqueinoriginal = length(unique(study139data$USUBJID))
+uniqueincleaned  = length(unique(study139data.remove.duplicates$USUBJID))
+
+paste0("Number of unique subject IDs in original: ", uniqueinoriginal)
+paste0("Number of unique subject IDs in cleaned : ", uniqueincleaned)
+
+if (length(duplicateids) > 0) {
+  print("There are duplicate subject IDs that made it past the algorithm! Get Tim to fix it!")
+  knitr::knit_exit()
+
+}
+
+if (uniqueinoriginal != uniqueincleaned) {
+  print("There is a difference in the subject IDs in the original and the cleaned datasets! Get Tim to fix it!")
+  
+  print(setdiff(study139data$USUBJID, study139data.remove.duplicates$USUBJID))
+  print(setdiff(study139data.remove.duplicates$USUBJID, study139data$USUBJID))
+  
+  knitr::knit_exit()
+  
+}
+
+# we made it though!
+
+study139data = study139data.remove.duplicates
+
+```
+
+
+## Samples with missing data
+
+### Missing date of collection
+
+```{r}
+
+paged_table(study139data[which(is.na(study139data$LBDTC)), c("LBREFID", "VISIT", "LBDTC", "LBDTC_excel", "USUBJID", "USUBJID_s")])
+
+
+```
+
+### Missing date of collection - from visit sc1a
+
+```{r}
+
+paged_table(study139data[which(is.na(study139data$LBDTC) & study139data$VISIT == "sc1a"), c("LBREFID", "VISIT", "LBDTC", "LBDTC_excel", "USUBJID", "USUBJID_s")])
+
+
+```
+
+
+
+# Compute APS on the data
+
+Samples where we cannot calculate APS:
+
+```{r}
+
+paste0("Samples with no age: ", length(which(is.na(study139data$age))))
+paste0("Samples with no apoe4copynr (usually QNS): ", length(which(is.na(study139data$apoe4copynr))))
+paste0("Samples with no Abeta4240_Plasma_IPMS (usually QNS): ", length(which(is.na(study139data$Abeta4240_Plasma_IPMS))))
+
+```
+
+
+```{r}
+# Load the model
+model = readRDS("model.clia3_25.rds")
+
+# Calculate the response of the model given the new data
+study139data$APS = round(predict(model, newdata = study139data, type='response') * 100)
+
+# APS = -1 means no age information
+study139data$APS[which(is.na(study139data$age))] = -1
+
+```
+
+6 random entries for testing APS calculation manually
+
+```{r}
+study139data[sample(6), c("LBREFID", "Abeta4240_Plasma_IPMS", "Abeta42_Plasma_IPMS", "Abeta40_Plasma_IPMS", "Proteotype", "age", "APS")]
+
+```
+
+
+```{r}
+# Assign category
+study139data$APS_Category = sapply(study139data$APS, categorize_aps)
+
+table(study139data$APS_Category)
+
+```
+
+
+
+# Data review
+
+
+
+```{r}
+
+# EXPORT DATA
+studyid = "STUDY139"
+modeldata = study139data[, c("age", "Proteotype", "apoe4copynr", "apoe2copynr", "Abeta42_Plasma_IPMS", "Abeta40_Plasma_IPMS", "Abeta4240_Plasma_IPMS")]
+
+modeldata$race = NA
+modeldata$ethnicity = NA
+modeldata$gender = NA
+modeldata$id = paste0(studyid, "_", study139data$LBREFID)
+modeldata$cohort = studyid
+#visual read positive - in this case not VR 
+modeldata$amyloidpositive = NA
+modeldata$centiloid = NA
+modeldata$MMSE = NA
+modeldata$CDR = NA
+modeldata$tracer = "Navidea"
+modeldata$diagnosis_desc = NA
+modeldata$state = "NA"
+
+write.csv(modeldata, paste0("small_model_data_", studyid, ".csv"))
+
+
+```
+
+
+
+## Demographics
+
+```{r results='asis'}
+
+demographics_table = 
+  list(
+        "Age" = 
+    list("Mean (sd)" = ~ qwraps2::mean_sd(na.omit(.data$age), denote_sd = "paren", digits = 1),
+         "Range" = ~ paste0(round(min(na.omit(.data$age)), 1), "-", round(max(na.omit(.data$age)), 1))
+         ),
+
+        "ApoE" = 
+    list("E2/E2" = ~ paste0(sum(as.numeric(.data$Proteotype == "E2/E2"), na.rm = t), " (", printpct(round(sum(as.numeric(.data$Proteotype == "E2/E2"), na.rm = t)/length(na.omit(.data$Proteotype))*100.0, 1) ), ")"  ) ,
+         "E2/E3" = ~ paste0(sum(as.numeric(.data$Proteotype == "E2/E3"), na.rm = t), " (", printpct(round(sum(as.numeric(.data$Proteotype == "E2/E3"), na.rm = t)/length(na.omit(.data$Proteotype))*100.0, 1) ), ")"  ) ,
+         "E2/E4" = ~ paste0(sum(as.numeric(.data$Proteotype == "E2/E4"), na.rm = t), " (", printpct(round(sum(as.numeric(.data$Proteotype == "E2/E4"), na.rm = t)/length(na.omit(.data$Proteotype))*100.0, 1) ), ")"  ) ,
+         "E3/E3" = ~ paste0(sum(as.numeric(.data$Proteotype == "E3/E3"), na.rm = t), " (", printpct(round(sum(as.numeric(.data$Proteotype == "E3/E3"), na.rm = t)/length(na.omit(.data$Proteotype))*100.0, 1) ), ")"  ) ,
+         "E3/E4" = ~ paste0(sum(as.numeric(.data$Proteotype == "E3/E4"), na.rm = t), " (", printpct(round(sum(as.numeric(.data$Proteotype == "E3/E4"), na.rm = t)/length(na.omit(.data$Proteotype))*100.0, 1) ), ")"  ) ,
+         "E4/E4" = ~ paste0(sum(as.numeric(.data$Proteotype == "E4/E4"), na.rm = t), " (", printpct(round(sum(as.numeric(.data$Proteotype == "E4/E4"), na.rm = t)/length(na.omit(.data$Proteotype))*100.0, 1) ), ")"  )
+         ),
+
+    
+          "APS Category" = 
+    list("High" = ~ paste0(sum(as.numeric(na.omit(.data$APS_Category) == "High")), " (", printpct(round(sum(as.numeric(na.omit(.data$APS_Category) == "High"))/length(na.omit(na.omit(.data$APS_Category)))*100.0, 1) ), ")"  ) ,
+         "Intermediate" = ~ paste0(sum(as.numeric(na.omit(.data$APS_Category) == "Intermediate")), " (", printpct(round(sum(as.numeric(na.omit(.data$APS_Category) == "Intermediate"))/length(na.omit(na.omit(.data$APS_Category)))*100.0, 1) ), ")"  ) ,
+         "Low" = ~ paste0(sum(as.numeric(na.omit(.data$APS_Category) == "Low")), " (", printpct(round(sum(as.numeric(na.omit(.data$APS_Category) == "Low"))/length(na.omit(na.omit(.data$APS_Category)))*100.0, 1) ), ")"  ) 
+         
+         ),
+
+
+        "Blood Abeta 42/40" = 
+    list("mean (sd)" = ~ qwraps2::mean_sd(na.omit(.data$Abeta4240_Plasma_IPMS), denote_sd = "paren", digits = 3),
+         "min" = ~ round(min(na.omit(.data$Abeta4240_Plasma_IPMS)), 3),
+         "max" = ~ round(max(na.omit(.data$Abeta4240_Plasma_IPMS)), 3)
+         ),
+    
+        "Blood Aβ40" = 
+    list("mean (sd)" = ~ qwraps2::mean_sd(na.omit(.data$Abeta40_Plasma_IPMS), denote_sd = "paren", digits = 1),
+         "min" = ~ round(min(na.omit(.data$Abeta40_Plasma_IPMS)), digits = 1),
+         "max" = ~ round(max(na.omit(.data$Abeta40_Plasma_IPMS)), digits = 1)
+         ),
+    
+        "Blood Aβ42" = 
+    list("mean (sd)" = ~ qwraps2::mean_sd(na.omit(.data$Abeta42_Plasma_IPMS), denote_sd = "paren", digits = 1),
+         "min" = ~ round(min(na.omit(.data$Abeta42_Plasma_IPMS)), digits = 1),
+         "max" = ~ round(max(na.omit(.data$Abeta42_Plasma_IPMS)), digits = 1)
+         )
+        
+  )
+
+
+
+# Show data for all subjects
+c = summary_table(study139data, demographics_table)
+
+colnames(c) = gsub("x", "-", colnames(c))
+
+c
+
+```
+
+
+## APS histogram
+
+```{r}
+ggplot(study139data, aes(x=APS)) + 
+  geom_histogram(aes(y=..density..),fill="dodgerblue3",color="white",alpha=0.7, binwidth = 5) + 
+  geom_density() +
+  geom_rug() +
+  geom_vline(xintercept = 35.5) +
+  geom_vline(xintercept = 57.5) +
+  labs(x='Abeta4240_Plasma_IPMS') +
+  theme_minimal()
+
+```
+
+## Age histogram
+
+```{r}
+
+ggplot(study139data, aes(x=age)) + 
+  geom_histogram(aes(y=..density..),fill="dodgerblue3",color="white",alpha=0.7, binwidth = 1) + 
+  geom_density() +
+  geom_rug() +
+  labs(x='Abeta4240_Plasma_IPMS') +
+  annotate("text", x=mean(study139data$age), y=0.02, label = paste0("mean = ", round(mean(study139data$age), 3))) +
+  theme_minimal()
+
+```
+
+
+
+## Abeta histograms
+
+```{r}
+ggplot(study139data, aes(x=Abeta4240_Plasma_IPMS)) + 
+  geom_histogram(aes(y=..density..),fill="dodgerblue3",color="white",alpha=0.7, binwidth = 0.005) + 
+  geom_density() +
+  geom_rug() +
+  geom_vline(xintercept = 0.089) +
+  labs(x='Abeta4240_Plasma_IPMS') +
+  annotate("text", x=mean(study139data$Abeta4240_Plasma_IPMS), y=20, label = paste0("mean = ", round(mean(study139data$Abeta4240_Plasma_IPMS), 3))) +
+  theme_minimal()
+
+ggplot(study139data, aes(x=Abeta40_Plasma_IPMS)) + 
+  geom_histogram(aes(y=..density..),fill="dodgerblue3",color="white",alpha=0.7, binwidth = 50) + 
+  geom_density() +
+  geom_rug() +
+  labs(x='Abeta40_Plasma_IPMS') +
+  annotate("text", x=mean(study139data$Abeta40_Plasma_IPMS), y=0.0025, label = paste0("mean = ", round(mean(study139data$Abeta40_Plasma_IPMS), 3))) +
+  theme_minimal()
+
+ggplot(study139data, aes(x=Abeta42_Plasma_IPMS)) + 
+  geom_histogram(aes(y=..density..),fill="dodgerblue3",color="white",alpha=0.7, binwidth = 5) + 
+  geom_density() +
+  geom_rug() +
+  labs(x='Abeta42_Plasma_IPMS') +
+  annotate("text", x=mean(study139data$Abeta42_Plasma_IPMS), y=0.025, label = paste0("mean = ", round(mean(study139data$Abeta42_Plasma_IPMS), 3))) +
+  theme_minimal()
+
+
+```
+
+
+## Abeta averages tracking by batch
+
+```{r}
+
+ggplot(study139data, aes(x=batch, y=Abeta4240_Plasma_IPMS)) + 
+  geom_point() +
+  geom_smooth(method = loess) +
+  labs(y='Abeta4240_Plasma_IPMS', x = "Batch") +
+  theme_minimal()
+
+ggplot(study139data, aes(x=batch, y=Abeta40_Plasma_IPMS)) + 
+  geom_point() +
+  geom_smooth(method = loess) +
+  labs(y='Abeta40_Plasma_IPMS', x = "Batch") +
+  theme_minimal()
+
+ggplot(study139data, aes(x=batch, y=Abeta42_Plasma_IPMS)) + 
+  geom_point() +
+  geom_smooth(method = loess) +
+  labs(y='Abeta42_Plasma_IPMS', x = "Batch") +
+  theme_minimal()
+
+```
+
+
+## Abeta averages tracking by date
+
+```{r}
+
+ggplot(study139data, aes(x=rundate, y=Abeta4240_Plasma_IPMS, color = as.factor(batch))) + 
+  geom_boxplot() +
+  labs(y='Abeta4240_Plasma_IPMS', x = "Date") +
+  theme_minimal()
+
+ggplot(study139data, aes(x=rundate, y=Abeta4240_Plasma_IPMS)) + 
+  geom_point() +
+  geom_smooth(method = loess) +
+  labs(y='Abeta4240_Plasma_IPMS', x = "Date") +
+  theme_minimal()
+
+ggplot(study139data, aes(x=rundate, y=Abeta40_Plasma_IPMS)) + 
+  geom_point() +
+  geom_smooth(method = loess) +
+  labs(y='Abeta40_Plasma_IPMS', x = "Date") +
+  theme_minimal()
+
+ggplot(study139data, aes(x=rundate, y=Abeta42_Plasma_IPMS)) + 
+  geom_point() +
+  geom_smooth(method = loess) +
+  labs(y='Abeta42_Plasma_IPMS', x = "Date") +
+  theme_minimal()
+
+```
+
+
+# Get data ready for export
+
+
+## Convert data from wide to long format
+
+Test codes:
+
++---------------+------------------------------------+----------------+
+| LBTESTCD      | LBTEST                             | LBORRESU       |
++===============+====================================+================+
+| AB42          | PLASMA ABETA42                     | pg/mL          |
++---------------+------------------------------------+----------------+
+| AB40          | PLASMA ABETA40                     | pg/mL          |
++---------------+------------------------------------+----------------+
+| AB4240        | ABETA42/40 RATIO                   |                |
+|               |                                    |                |
+|               | Provided as 3 decimal point        |                |
+|               | precision (eg. 0.090)              |                |
++---------------+------------------------------------+----------------+
+| APS           | AMYLOID PROBABILITY SCORE          |                |
+|               |                                    |                |
+|               | Integer between 0 and 100 (both    |                |
+|               | inclusive)                         |                |
++---------------+------------------------------------+----------------+
+| APOE          | APOE PROTEOTYPE                    |                |
++---------------+------------------------------------+----------------+
+
+```{r}
+
+# 1) Keep just the data we report
+study139data.export = study139data[, c("USUBJID", "LBREFID", "LBSTAT", "LBREASND", "LBDTC", "VISIT", "Abeta40_Plasma_IPMS", "Abeta42_Plasma_IPMS", "Abeta4240_Plasma_IPMS", "APS", "Proteotype")]
+colnames(study139data.export) = c("USUBJID", "LBREFID", "LBSTAT", "LBREASND", "LBDTC", "VISIT", "AB40", "AB42", "AB4240", "APS", "APOE")
+
+# 1.1) Round the ratio to 3 sig digits
+study139data.export$AB4240 = round(study139data.export$AB4240, 3)
+
+# 1.2) GENOPYE SHOULD BE _ not /
+study139data.export$APOE = gsub('/', '_', study139data.export$APOE)
+
+# 1.3) Convert date to text
+study139data.export$LBDTC = as.character(study139data.export$LBDTC)
+study139data.export[which(is.na(study139data.export$LBDTC)), ]$LBDTC = ""
+
+# 2) Convert to long format
+study139data.export.long = melt(study139data.export, id.vars = c("USUBJID","LBREFID", "LBSTAT", "LBREASND", "LBDTC", "VISIT"), variable.name = "LBTESTCD", value.name = "LBORRES")
+
+# 3) Sort by USUBJID & LBREFID
+study139data.export.long = study139data.export.long[
+  with(study139data.export.long, order(USUBJID, LBREFID)),
+]
+
+
+# For samples missing age data (APS = -1) - fill in LBSTAT, LBREASND then change LBORRES to ""
+study139data.export.long[which(study139data.export.long$LBORRES == -1 & study139data.export.long$LBSTAT == "" & study139data.export.long$LBTESTCD == "APS"), "LBSTAT"] = "ND"
+study139data.export.long[which(study139data.export.long$LBORRES == -1 & study139data.export.long$LBREASND == "" & study139data.export.long$LBTESTCD == "APS"), "LBREASND"] = "Patient age missing"
+study139data.export.long[which(study139data.export.long$LBORRES == -1 & study139data.export.long$LBTESTCD == "APS"), "LBORRES"] = ""
+
+
+# For QNS samples all the results are NA - but they do not want NA in the LBORRES column so we will change all NA to ""
+study139data.export.long[which(is.na(study139data.export.long$LBORRES)), "LBORRES"] = "" 
+  
+
+formattable(sample_n(study139data.export.long, 20))
+
+
+```
+
+## Add the other fields to the export file
+
+Order of fields in the output file:
+
+| Field Name | Value       |
+|------------|-------------|
+| STUDYID    | "A3-45"     |
+| DOMAIN     | "LB"        |
+| SITE       | ""          |
+| USUBJID    | dynamic     |
+| LBNAM      | "C2N"       |
+| LBREFID    | dynamic     |
+| VISIT      | dynamic     |
+| LBDTC      | "dynamic"   |
+| LBSPEC     | "PLASMA"    |
+| LBCAT      | "BIOMARKER" |
+| LBTESTCD   | dynamic     |
+| LBORRES    | dynamic     |
+| LBORRESU   | per above   |
+| LBMETHOD   | "LC-MS/MS"  |
+| LBSTAT     | dynamic     |
+| LBREASND   | dynamic     |
+
+
+```{r}
+# STATIC ONES FIRST:
+study139data.export.long$STUDYID  = "A3-45"
+study139data.export.long$DOMAIN   = "LB"
+study139data.export.long$SITE     = ""
+study139data.export.long$LBNAM    = "C2N" 
+#study139data.export.long$VISIT    = "sc1"
+#study139data.export.long$LBDTC    = ""
+study139data.export.long$LBSPEC   = "PLASMA"  
+study139data.export.long$LBCAT    = "BIOMARKER"
+study139data.export.long$LBMETHOD = "LC-MS/MS"
+#study139data.export.long$LBSTAT   = ""
+#study139data.export.long$LBREASND = ""  
+
+# UNIT DEPENDS ON LBTESTCD
+study139data.export.long$LBORRESU = "" 
+study139data.export.long$LBORRESU[which(study139data.export.long$LBTESTCD == "AB42" | study139data.export.long$LBTESTCD == "AB40")] = "pg/mL"
+
+
+
+```
+
+
+```{r}
+
+# ORDER THE COLUMNS
+col_order = c("STUDYID", "DOMAIN", "SITE", "USUBJID", "LBNAM", "LBREFID", "VISIT", "LBDTC", "LBSPEC", "LBCAT", "LBTESTCD", "LBORRES", "LBORRESU", "LBMETHOD", "LBSTAT", "LBREASND")
+study139data.export.long.sort = study139data.export.long[, ..col_order]
+
+paged_table(study139data.export.long.sort)
+  
+```
+
+
+
+Number of samples in final file:
+
+```{r}
+
+length(study139data$LBREFID)
+
+```
+
+Number of lines in the long export file divided by 5 since there are 5 results per sample.
+
+```{r}
+
+length(study139data.export.long.sort$USUBJID)/5
+
+```
+
+
+
+```{r message=FALSE}
+
+## TEST
+# A3-45_TEST_C2N_BM_FULL_YYYYMMDDX.csv f
+
+## PROD
+# A3-45_PROD_C2N_BM_FULL_YYYYMMDDX.csv 
+
+currentDate = format(Sys.Date(), "%Y%m%d") 
+filename = paste0("A3-45_PROD_C2N_BM_FULL_", currentDate, "1.csv")
+write.csv(study139data.export.long.sort, filename, row.names=FALSE)
+
+message(paste0("Data export saved to: ", filename))
+message(paste0("Time to run this code: ", difftime(Sys.time(), now)))
+
+```
+
+
+
+
+

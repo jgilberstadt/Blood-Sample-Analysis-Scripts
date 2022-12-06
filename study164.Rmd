@@ -1,0 +1,159 @@
+---
+title: "STUDY149: DRAFT Interim Data Analysis"
+author: "C2N Diagnostics - proprietary and confidential information. Not to be copied or distributed without C2N written consent."
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: default
+    toc: true
+    toc_float: true
+    number_sections: true
+
+---
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+
+now <<- Sys.time()
+
+library(ggplot2)
+library(pROC)
+library(data.table)
+library(caret)
+library(plyr)
+library(dplyr)
+library(ggpubr)
+library(expss)
+library(ggforce)
+library(gridExtra)
+# visualizing the effects of variables in a GLM
+library(effects)
+library(Matrix)
+library(readxl)
+
+library(DiagrammeR)
+#http://rich-iannone.github.io/DiagrammeR/graphviz_and_mermaid.html
+#https://bookdown.org/yihui/rmarkdown-cookbook/diagrams.html
+
+library(usmap)
+
+library(formattable)
+#library(tidyr)
+
+library(gridExtra)
+library(qwraps2)
+options(qwraps2_markup = "markdown")
+
+
+printpct = function(percentage) {
+  if (percentage > 0)
+    return(paste0(percentage, "%"))
+  else
+    return("-")
+}
+
+# Plot & visualization
+theme_new <- function(base_size = 12, base_family = ""){
+  theme_bw(base_size = base_size, base_family = base_family) %+replace%
+    theme(
+      legend.key=element_rect(colour=NA, fill =NA),
+      panel.grid = element_blank(),   
+      panel.border = element_rect(fill = NA, colour = "black", size=1),
+      panel.background = element_rect(fill = "white", colour = "black"), 
+      strip.background = element_rect(fill = NA)
+    )
+}
+theme_set(theme_new(base_size = 16))
+
+categorize_aps = function (APS) {
+  
+  if (is.na(APS)) {
+    return(NA)
+  }
+  
+  if (APS <= 35) {
+    return("Low")
+  } else if (APS >= 58) {
+    return("High")
+  } else {
+    return("Intermediate")
+  }
+  
+}
+
+
+study164data = read_excel("Study164 - Combined Data_Run2.xlsx", col_types = c("text", "numeric", "numeric", "numeric","numeric", "text"))
+colnames(study164data) = c("Subject ID", "age", "Abeta40_Plasma_IPMS", "Abeta42_Plasma_IPMS", "Abeta4240_Plasma_IPMS", "Proteotype")
+
+# count apoE4 alleles
+study164data$apoe4copynr = 0
+study164data$apoe4copynr[is.na(study164data$Proteotype)] = NA
+study164data$apoe4copynr[study164data$Proteotype == "E2/E4"] = 1
+study164data$apoe4copynr[study164data$Proteotype == "E3/E4"] = 1
+study164data$apoe4copynr[study164data$Proteotype == "E4/E4"] = 2
+# E4 presence
+study164data$apoe4present = (study164data$apoe4copynr > 0)
+
+# count apoE2 alleles
+study164data$apoe2copynr = 0
+study164data$apoe2copynr[is.na(study164data$Proteotype)] = NA
+study164data$apoe2copynr[study164data$Proteotype == "E2/E2"] = 2
+study164data$apoe2copynr[study164data$Proteotype == "E2/E3"] = 1
+study164data$apoe2copynr[study164data$Proteotype == "E2/E4"] = 1
+# E2 presence
+study164data$apoe2present = (study164data$apoe2copynr > 0)
+
+
+```
+
+
+
+# APS Calculation
+
+Load CLIA model and calculate APS result for all patients
+
+```{r}
+
+# Load the model
+model = readRDS("model.clia3_25.rds")
+
+
+# Calculate the response of the model given the new data
+study164data$APS = round(predict(model, newdata = study164data, type='response') * 100)
+
+# Assign category
+study164data$APS_Category = sapply(study164data$APS, categorize_aps)
+
+
+hist(study164data$APS )
+
+```
+
+```{r}
+table(study164data$APS_Category)
+```
+
+```{r}
+
+table(study164data$Proteotype)
+
+```
+
+
+
+# Export
+
+```{r}
+
+exportdata = study164data[c("Subject ID", "age", "Abeta40_Plasma_IPMS", "Abeta42_Plasma_IPMS", "Abeta4240_Plasma_IPMS", "Proteotype", "APS")]
+
+head(exportdata)
+
+write.csv(exportdata, "study164_combined_data_run2.csv")
+
+```
+
+

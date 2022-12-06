@@ -1,0 +1,249 @@
+---
+title: "STUDY137: DRAFT Interim Data Analysis"
+author: "C2N Diagnostics - proprietary and confidential information. Not to be copied or distributed without C2N written consent."
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: default
+    toc: true
+    toc_float: true
+    number_sections: true
+
+---
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+
+now <<- Sys.time()
+
+library(ggplot2)
+library(pROC)
+library(data.table)
+library(caret)
+library(plyr)
+library(dplyr)
+library(ggpubr)
+library(expss)
+library(ggforce)
+library(gridExtra)
+# visualizing the effects of variables in a GLM
+library(effects)
+library(Matrix)
+library(readxl)
+
+library(DiagrammeR)
+#http://rich-iannone.github.io/DiagrammeR/graphviz_and_mermaid.html
+#https://bookdown.org/yihui/rmarkdown-cookbook/diagrams.html
+
+library(usmap)
+
+library(formattable)
+#library(tidyr)
+
+library(gridExtra)
+library(qwraps2)
+options(qwraps2_markup = "markdown")
+
+
+printpct = function(percentage) {
+  if (percentage > 0)
+    return(paste0(percentage, "%"))
+  else
+    return("-")
+}
+
+# Plot & visualization
+theme_new <- function(base_size = 12, base_family = ""){
+  theme_bw(base_size = base_size, base_family = base_family) %+replace%
+    theme(
+      legend.key=element_rect(colour=NA, fill =NA),
+      panel.grid = element_blank(),   
+      panel.border = element_rect(fill = NA, colour = "black", size=1),
+      panel.background = element_rect(fill = "white", colour = "black"), 
+      strip.background = element_rect(fill = NA)
+    )
+}
+theme_set(theme_new(base_size = 16))
+
+categorize_aps = function (APS) {
+  
+  if (is.na(APS)) {
+    return(NA)
+  }
+  
+  if (APS <= 35) {
+    return("0-35: Consistent with absence of amyloid plaques")
+  } else if (APS >= 58) {
+    return("58-100: Consistent with presence of amyloid plaques")
+  } else {
+    return("36-57: Intermediate")
+  }
+  
+}
+
+completion_status = function (APS) {
+  
+  if (is.na(APS)) {
+    return("Rejected")
+  } else {
+    return("Complete")
+  }
+  
+}
+
+
+
+reason_not_analyzed  = function (reason) {
+  
+  if (is.na(reason)) {
+    return("")
+  } else {
+    return(reason)
+  }
+  
+}
+
+
+abetadata = read_excel("Study137_All_Abeta_06OCT2022.xlsx", col_types = c("text", "numeric", "numeric", "numeric", "text", "numeric", "numeric", "text", "text", "text"))
+
+apoedata = read_excel("Study137_All_ApoE_06OCT2022.xlsx", col_types = c("text", "text", "text"))
+
+colnames(abetadata) = c("Label Id", "Abeta 40", "Abeta 42", "Abeta 42 40 Ratio", "Reason For Not Analyzed", "Age", "Batch", "Run Date", "col9", "col10")
+
+colnames(apoedata) = c("Label Id", "Apoe Genotype", "ApoE_comment")
+
+entries = length(abetadata$`Label Id`)
+
+study137data.c2n = merge(abetadata, apoedata)
+
+if (entries != length(study137data.c2n$`Label Id`)) {
+  print("Merge of data failed!")
+  
+  print(paste0("Samples in Abeta not in ApoE: ", setdiff(abetadata$`Sample.Label Id`, apoedata$`Label Id`)))
+  print(paste0("Samples in ApoE not in Abeta: ", setdiff(apoedata$`Sample.Label Id`, abetadata$`Label Id`)))
+
+  knitr::knit_exit()
+  
+} else {
+  print("Merge successful!")
+  
+}
+
+# Calculate ratio
+study137data.c2n$Abeta4240_Plasma_IPMS = study137data.c2n$"Abeta 42"/study137data.c2n$"Abeta 40"
+
+study137data.c2n$age=study137data.c2n$Age
+
+# count apoE4 alleles
+study137data.c2n$apoe4copynr = 0
+study137data.c2n$apoe4copynr[is.na(study137data.c2n$"Apoe Genotype")] = NA
+study137data.c2n$apoe4copynr[study137data.c2n$"Apoe Genotype" == "E2/E4"] = 1
+study137data.c2n$apoe4copynr[study137data.c2n$"Apoe Genotype" == "E3/E4"] = 1
+study137data.c2n$apoe4copynr[study137data.c2n$"Apoe Genotype" == "E4/E4"] = 2
+# E4 presence
+study137data.c2n$apoe4present = (study137data.c2n$apoe4copynr > 0)
+
+# count apoE2 alleles
+study137data.c2n$apoe2copynr = 0
+study137data.c2n$apoe2copynr[is.na(study137data.c2n$"Apoe Genotype")] = NA
+study137data.c2n$apoe2copynr[study137data.c2n$"Apoe Genotype" == "E2/E2"] = 2
+study137data.c2n$apoe2copynr[study137data.c2n$"Apoe Genotype" == "E2/E3"] = 1
+study137data.c2n$apoe2copynr[study137data.c2n$"Apoe Genotype" == "E2/E4"] = 1
+# E2 presence
+study137data.c2n$apoe2present = (study137data.c2n$apoe2copynr > 0)
+
+
+
+
+```
+
+
+```{r}
+study137data.c2n$"Patient Id"=substr(study137data.c2n$"Label Id",2,10)
+study137data.c2n$"Patient Id"
+
+study137data.c2n$Study="STUDY137"
+
+
+
+
+```
+
+
+
+
+
+
+# APS Calculation
+
+Load CLIA model and calculate APS result for all patients
+
+```{r}
+
+# Load the model
+model = readRDS("model.clia3_25.rds")
+
+
+# Calculate the response of the model given the new data
+study137data.c2n$"APS Score" = round(predict(model, newdata = study137data.c2n, type='response') * 100)
+
+# Assign category
+study137data.c2n$"Aps Interpretation" = sapply(study137data.c2n$"APS Score", categorize_aps)
+
+hist(study137data.c2n$"APS Score")
+
+```
+
+```{r}
+table(study137data.c2n$APS_Category)
+```
+
+```{r}
+
+table(study137data.c2n$"Apoe Genotype")
+
+```
+
+
+
+# Export
+
+## Clean up the reason for not analyzed
+
+```{r}
+
+
+study137data.c2n$"Completion Status" = sapply(study137data.c2n$"APS Score", completion_status)
+
+study137data.c2n$"Reason For Not Analyzed" = sapply(study137data.c2n$"Reason For Not Analyzed", reason_not_analyzed)
+
+
+```
+
+
+## Fix column names and order for export
+
+```{r}
+
+exportdata = study137data.c2n[, c("Study", "Label Id", "Patient Id", "Abeta 40", "Abeta 42", "Abeta 42 40 Ratio", "Apoe Genotype", "APS Score", "Aps Interpretation", "Age", "Completion Status", "Reason For Not Analyzed")]
+
+
+colnames(exportdata) = c("Sample.Study", "Sample.Label Id", "Sample.Patient Id", "Abeta 40", "Abeta 42", "Abeta 42 40 Ratio", "Apoe Genotype", "APS Score", "Aps Interpretation", "Age", "Completion Status", "Lims Html Notes.Reason For Not Analyzed")
+
+
+
+
+head(exportdata)
+
+
+currentDate = format(Sys.Date(), "%Y%m%d") 
+filename = paste0("BIO-HERMES_C2N_FULL_", currentDate, "1.csv")
+
+write.csv(exportdata, filename, row.names=FALSE)
+
+```
+
+

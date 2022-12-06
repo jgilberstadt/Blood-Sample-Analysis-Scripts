@@ -1,0 +1,1081 @@
+---
+title: "STUDY122 / BAN2401-301 - Data processing script"
+author: "C2N Diagnostics - proprietary and confidential information. Not to be copied or distributed without C2N written consent."
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+
+now <<- Sys.time()
+
+library(rmarkdown)
+library(ggplot2)
+library(pROC)
+library(data.table)
+library(caret)
+library(plyr)
+library(dplyr)
+library(ggpubr)
+library(expss)
+library(ggforce)
+library(gridExtra)
+# visualizing the effects of variables in a GLM
+library(effects)
+library(Matrix)
+
+# For nicer looking html tables
+library(formattable)
+library(readxl)
+
+# For summary tables
+library(qwraps2)
+options(qwraps2_markup = "markdown")
+
+library(DiagrammeR)
+#http://rich-iannone.github.io/DiagrammeR/graphviz_and_mermaid.html
+#https://bookdown.org/yihui/rmarkdown-cookbook/diagrams.html
+
+
+
+
+# Plot & visualization
+theme_new <- function(base_size = 12, base_family = ""){
+  theme_bw(base_size = base_size, base_family = base_family) %+replace%
+    theme(
+      legend.key=element_rect(colour=NA, fill =NA),
+      panel.grid = element_blank(),   
+      panel.border = element_rect(fill = NA, colour = "black", size=1),
+      panel.background = element_rect(fill = "white", colour = "black"), 
+      strip.background = element_rect(fill = NA)
+    )
+}
+
+theme_set(theme_new(base_size = 16))
+
+
+printpct = function(percentage) {
+  percentage = as.numeric(percentage)
+  
+  if (is.na(percentage) | percentage == 0)
+    return("-")
+  else
+    return(paste0(percentage, "%"))
+}
+
+categorize_aps = function (APS) {
+  
+  if (is.na(APS)) {
+    return(NA)
+  }
+  
+  if (APS <= 35) {
+    return("Low")
+  } else if (APS >= 58) {
+    return("High")
+  } else {
+    return("Intermediate")
+  }
+  
+}
+
+
+## date given as number of days since 1900-01-01 (a date in 1989)
+##  as.Date(32768, origin = "1900-01-01")
+## Excel is said to use 1900-01-01 as day 1 (Windows default) or
+## 1904-01-01 as day 0 (Mac default), but this is complicated by Excel
+## incorrectly treating 1900 as a leap year.
+## So for dates (post-1901) from Windows Excel:
+##  as.Date(35981, origin = "1899-12-30") # 1998-07-05
+getDateFromExcel = function (datestring) {
+  
+  converteddate = NA
+  
+  if(is.na(as.numeric(datestring))) {
+    # the date is a string not a number
+    converteddate = as.Date(datestring, tryFormats = c("%d%b%Y"))
+    
+  } else {
+    # the date is stoed as Excel date - which is converted to a number when casta s text
+    converteddate = as.Date(as.numeric(datestring), origin = "1899-12-30")
+    
+  }
+  
+  return(as.character(converteddate))
+  
+}
+
+```
+
+
+# Put data together
+
+## Load in the sample list from Hongmei
+
+
+Load in Batch 1&2
+
+```{r}
+#hongmeidata = read_xlsx("Batch1 Shipment_C2N_updated_13Jul2022.xlsx", col_types = c("text"))  
+hongmeidata12 = read_xlsx("Batch2_Shipment.xlsx", col_types = c("text"))  
+
+```
+
+Load in Batch 3&4
+
+```{r}
+
+hongmeidata34 = read_xlsx("C2N Batch 3&4 Sample list _18Aug2022_sent (original from Hongmei.xlsx", col_types = c("text"))
+
+```
+
+
+Colnames differences
+
+```{r}
+
+setdiff(colnames(hongmeidata12), colnames(hongmeidata34))
+setdiff(colnames(hongmeidata34), colnames(hongmeidata12))
+
+```
+
+Keep just what we need from both
+
+```{r}
+
+hongmeidata12 = hongmeidata12[, c("Specimen_ID", "Sampled_Date", "Screen_Id", "Protocol", "Visit_Name", "Visit_Description")]
+hongmeidata34 = hongmeidata34[, c("Specimen_ID", "Sampled_Date", "Screen_Id", "Protocol", "Visit_Name", "Visit_Description")]
+
+hongmeidata = hongmeidata34 #rbind(hongmeidata12, hongmeidata34)
+
+#ids = rbind(hongmeidata[duplicated(hongmeidata$Specimen_ID), ]
+#ids = ids[order(ids$Specimen_ID), ]
+
+```
+
+
+
+
+
+```{r}
+
+# Fix the date
+hongmeidata$PCDTC = as.character(as.Date(substr(hongmeidata$Sampled_Date, 1, 7), format = "%d%b%y"))
+
+# Fix study ID
+hongmeidata[which(hongmeidata$Protocol == "BAN2401-G000-301"), "STUDYID"] = "BAN2401 G000 301"
+
+hongmeidata_c = hongmeidata[, c("Specimen_ID", "PCDTC", "Screen_Id", "STUDYID", "Visit_Name", "Visit_Description")]
+
+colnames(hongmeidata_c) = c("PCREFID", "PCDTC", "SUBJID", "STUDYID", "VISITNAME", "VISITDESCRIPTION")
+
+table(hongmeidata_c$VISITDESCRIPTION)
+
+```
+
+### Translate VISITNAME to VISIT
+
+```{r}
+
+#    VISITNAME == "V22" ~ "UNSCH",
+#    VISITNAME == "V6" ~ "UNSCH",
+#    VISITNAME == "V9" ~ "UNSCH",
+
+
+hongmeidata_c = hongmeidata_c %>% 
+  mutate(VISIT = case_when(
+# This is a case statement - so do the VISITDESCRIPTION unscheduled ones first
+    VISITDESCRIPTION == "UNSCH / RETEST" ~ "UNSCH",
+    VISITDESCRIPTION == "AMD6 UNSCH/RETEST" ~ "UNSCH",
+    
+# Then look at the VISITNAME
+    VISITNAME == "V3W1" ~ "V3W1",
+    VISITNAME == "V3" ~ "V3W1",
+    VISITNAME == "V16" ~ "V16W27",
+    VISITNAME == "V29" ~ "V29W53",
+    VISITNAME == "V41" ~ "V41W77",
+    VISITNAME == "V41 AMD6" ~ "V41W77",
+    VISITNAME == "Early Term" ~ "ET",
+    VISITNAME == "EARLY TERM" ~ "ET",
+    VISITNAME == "EARLY TERM AMEND 01" ~ "ET",
+    VISITNAME == "Early Term AMEND01" ~ "ET",
+    VISITNAME == "V42" ~ "V42W79",
+    VISITNAME == "V42A" ~ "V42W79",
+    VISITNAME == "V50" ~ "V50W93",
+    VISITNAME == "V56" ~ "V56W105",
+    VISITNAME == "V42 AMD6" ~ "V42W79",
+    VISITNAME == "V50 AMD6" ~ "V50W93",
+    VISITNAME == "V56 AMD6" ~ "V56W105",
+    VISITNAME == "V70" ~ "V70W133",
+    VISITNAME == "V82" ~ "V82W157",
+    VISITNAME == "V93" ~ "V93W179",
+
+# Then default value
+    TRUE ~ ""
+  )
+)
+
+#table(hongmeidata_c$VISIT)
+#table(manifest_c$VISITNAME)
+
+# touble subject: 10541038
+
+hongmeidata_c[which(hongmeidata_c$SUBJID == "10541038"), ]
+
+
+```
+
+How did that go?
+
+```{r}
+
+paste0("We have ", length(hongmeidata_c$PCREFID), " entries in the full list")
+paste0("Of those ", length(hongmeidata_c[which(hongmeidata_c$VISIT == ""), ]$PCREFID), " entries did not match the right visit type")
+
+table(hongmeidata_c[which(hongmeidata_c$VISIT == ""), ]$VISITNAME)
+
+```
+
+
+First 6 entries:
+
+```{r}
+
+head(hongmeidata_c)
+
+```
+
+
+### Information from manifest
+
+The following information comes from the external file:
+
+
+| Field Name | Value       |
+|------------|-------------|
+| SUBJID    | from manifest     |
+| VISIT      | from manifest     |
+| PCDTC      | from manifest   |
+| STUDYID    | from manifest    |
+
+
+
+### Unique SUBJID
+
+```{r}
+
+paste0("Out of **", length(hongmeidata_c$SUBJID), "** entries in the manifest there are ", length(unique(hongmeidata_c$SUBJID)), " unique subject identifiers.")
+
+```
+
+
+
+
+## Load in the cumulative datafile
+
+```{r}
+
+# JOSH CHANGE THE DATE TO THE DATE IN THE FILENAME LIKE
+# All Abeta Data_23MAR2022.xlsx
+#dateoffile = "24Aug2022"
+#dateoffile = "14Sep2022"
+
+# Email from Venky, 04 OCT 2022. There are additional 11 samples that have data. Data was sent from Kris. I (TW) had to manually add this data to the end of the data file from 14Sept2022 to include this data in a new file:
+dateoffile = "04Oct2022"
+
+# Read Abeta file and force column types
+abetadata = read_xlsx(paste0("cumulativefiles/STUDY122_Abeta_Data_", dateoffile, ".xlsx"), 
+                      col_types = c("text", "numeric", "numeric", "text", "text", "text", "numeric", "text", "numeric", "date"))
+
+# Rename columns per DTA - for this they use PC
+
+colnames(abetadata) = c("PCREFID", "Abeta40_Plasma_IPMS", "Abeta42_Plasma_IPMS", "Abeta4240_Plasma_IPMS_excel", "Abeta_comment", "PCDTC_excel", "YearOfBirth", "SUBJID_excel", "batch", "rundate")
+
+abetadata$Abeta4240_Plasma_IPMS = abetadata$Abeta42_Plasma_IPMS / abetadata$Abeta40_Plasma_IPMS
+
+```
+
+### Data points per batch
+
+Abeta
+
+```{r}
+
+table(abetadata$batch)
+
+```
+
+
+### Number of unique sample identifiers
+
+Abeta file unique IDs:
+
+```{r}
+
+length(unique(abetadata$PCREFID))
+
+```
+
+
+```{r}
+
+if (length(unique(abetadata$PCREFID)) != length(abetadata$PCREFID)) {
+  
+  print(paste0("The number of unique PCREFIDs (", length(unique(abetadata$PCREFID)), ") is not the same as the number of data points (", length(abetadata$PCREFID), ")"))
+  print("Before we merge the data we must take out any duplicate data from the Abeta data files.")
+  print("The following batches contain duplicated PCREFIDs: ")
+
+  print(unique(abetadata[duplicated(abetadata$PCREFID), c("PCREFID", "batch")]))
+  print(unique(abetadata[duplicated(abetadata$PCREFID, fromLast = T), c("PCREFID", "batch")]))
+  
+  knitr::knit_exit()
+  
+} else {
+  
+  print("No duplicate PCREFIDs in the Abeta data file")
+  
+}
+
+
+```
+
+
+## Merge data from cumulative file with region files
+
+```{r}
+
+study122data = merge(abetadata, hongmeidata_c, by = c("PCREFID"), all.x = T)
+
+```
+
+### Check on merge
+
+
+```{r}
+
+paste0("Out of a total of ", length(study122data$PCREFID), " data points, ", sum(as.numeric(!is.na(study122data$SUBJID))), " samples got a subject ID from the manifest")
+
+
+
+if(sum(as.numeric(is.na(study122data$SUBJID))) > 0) {
+
+  print(paste0("There are ", sum(as.numeric(is.na(study122data$SUBJID))), " patients in the datafile that are not present in the manifest - these should be reconciled."))  
+  formattable(study122data[which(is.na(study122data$SUBJID)), c("PCREFID", "SUBJID", "VISIT", "PCDTC", "batch", "rundate")])
+
+  print(table(study122data[which(is.na(study122data$SUBJID)), "batch"]))
+  
+  
+#  knitr::knit_exit()
+  
+}
+
+
+```
+
+
+
+### Make sure all have valid VISIT information
+
+```{r}
+
+#manifest_i = manifest_i[complete.cases(manifest_i[ , c("Protocol", "Patient ID")]),]
+
+if (length(which(study122data$VISIT == "")) > 0) {
+
+  print(paste0(length(which(study122data$VISIT == "")), " VISITNAMEs were not translated to VISIT - either a wrong sample was analyzed or the VISITNAME was typed wrong"))
+  
+  print(formattable(study122data[which(study122data$VISIT == ""), c("PCREFID", "SUBJID", "VISIT", "VISITNAME")]))
+  
+  print(table(study122data[which(study122data$VISIT == ""), c("VISITNAME")]))
+  
+#  knitr::knit_exit()
+  
+} else {
+  
+  print("All VISITNAMEs translated")
+}
+
+
+
+```
+
+
+
+### SubjectIDs 
+
+Comes from the manifest. Empty SUBJID:
+
+```{r}
+
+table(is.na(study122data$SUBJID))
+
+
+```
+
+Unique SUBJID:
+
+```{r}
+
+length(unique(study122data$SUBJID))
+
+```
+
+
+
+### Are subjects analyzed on one or more batches?
+
+```{r}
+
+#table(study122data$SUBJID, study122data$batch)
+
+subjectids = unique(study122data$SUBJID)
+
+subjectid = "10011007"
+
+multiplebatches = data.frame()
+
+for (subjectid in subjectids) {
+  
+  dataset = study122data[which(study122data$SUBJID == subjectid), ]
+  batches = unique(dataset$batch)
+  
+  if (length(batches) > 1) {
+    #print(paste0("Samples from subject ", subjectid, " is present on more than one batch (", paste(batches, collapse= ", "), ")"))
+
+  }
+  
+  multiplebatches = rbind(multiplebatches, data.frame("SUBJID" = subjectid, "numberofbatches" = length(batches)))
+  
+}
+
+paste0("Number of patients with X number of batches")
+
+table(multiplebatches$numberofbatches)
+
+```
+
+
+
+
+
+## Clean out any samples with comments
+
+```{r}
+
+study122data$Abeta_comment[which(study122data$Abeta_comment == "")] = NA
+
+```
+
+### Abeta comments:
+
+```{r}
+
+formattable(table(study122data$Abeta_comment))
+
+```
+
+
+Change "\u03b2" to "beta"
+
+```{r}
+
+study122data$Abeta_comment = gsub('\u03b2', 'beta', study122data$Abeta_comment)
+
+formattable(table(study122data$Abeta_comment))
+
+```
+
+
+
+### Samples with comments = Not Done
+
+For all samples with sample comments:
+
+* Set the results to NA
+* Set status to ND
+
+Set the reason not done to a concatenation of Abeta comments and then make sure that the reason not done it not longer than 200 characters as per the DTA.
+
+```{r}
+
+study122data$PCSTAT = ""
+
+sampleswithqns = which(!is.na(study122data$Abeta_comment))
+
+paste0("Number of samples: ", length(study122data$PCREFID), ", samples with comments: ", length(sampleswithqns))
+
+if (length(sampleswithqns) > 0) {
+  study122data[sampleswithqns, c("Abeta40_Plasma_IPMS", "Abeta42_Plasma_IPMS", "Abeta4240_Plasma_IPMS")] = NA
+  
+  # Set status and reason not done
+  study122data[sampleswithqns, c("PCSTAT")] = "ND"
+  
+}
+
+
+
+# convert NA back to ""
+study122data$Abeta_comment[is.na(study122data$Abeta_comment)] = ""
+
+# use the comment as the reason not done
+study122data$PCREASND = study122data$Abeta_comment
+
+# make sure that reason not done does not overflow the 200 characters
+study122data$PCREASND = substr(study122data$PCREASND,1,200)
+
+table(study122data$PCREASND)
+
+#study122data[sampleswithqns, c("PCREASND")] = "QNS"
+
+```
+
+
+
+# Data review
+
+```{r}
+
+# EXPORT DATA
+studyid = "STUDY122"
+modeldata = study122data[, c("Abeta42_Plasma_IPMS", "Abeta40_Plasma_IPMS", "Abeta4240_Plasma_IPMS")]
+
+modeldata$race = NA
+modeldata$ethnicity = NA
+modeldata$gender = NA
+modeldata$id = paste0(studyid, "_", study122data$PCREFID)
+modeldata$cohort = studyid
+#visual read positive - in this case not VR 
+modeldata$amyloidpositive = NA
+modeldata$centiloid = NA
+modeldata$MMSE = NA
+modeldata$CDR = NA
+modeldata$tracer = NA
+modeldata$diagnosis_desc = NA
+modeldata$state = "NA"
+
+write.csv(modeldata, paste0("small_model_data_", studyid, ".csv"))
+
+
+```
+
+
+
+## Demographics
+
+```{r results='asis'}
+
+
+demographics_table = 
+  list(
+
+        "Blood Aβ42/40" = 
+    list("mean (sd)" = ~ qwraps2::mean_sd(na.omit(.data$Abeta4240_Plasma_IPMS), denote_sd = "paren", digits = 3),
+         "min" = ~ round(min(na.omit(.data$Abeta4240_Plasma_IPMS)), 3),
+         "max" = ~ round(max(na.omit(.data$Abeta4240_Plasma_IPMS)), 3)
+         ),
+    
+        "Blood Aβ40" = 
+    list("mean (sd)" = ~ qwraps2::mean_sd(na.omit(.data$Abeta40_Plasma_IPMS), denote_sd = "paren", digits = 1),
+         "min" = ~ round(min(na.omit(.data$Abeta40_Plasma_IPMS)), digits = 1),
+         "max" = ~ round(max(na.omit(.data$Abeta40_Plasma_IPMS)), digits = 1)
+         ),
+    
+        "Blood Aβ42" = 
+    list("mean (sd)" = ~ qwraps2::mean_sd(na.omit(.data$Abeta42_Plasma_IPMS), denote_sd = "paren", digits = 1),
+         "min" = ~ round(min(na.omit(.data$Abeta42_Plasma_IPMS)), digits = 1),
+         "max" = ~ round(max(na.omit(.data$Abeta42_Plasma_IPMS)), digits = 1)
+         )
+        
+  )
+
+
+
+
+# Show data for all subjects
+c = summary_table(study122data, demographics_table)
+
+colnames(c) = gsub("x", "All", colnames(c))
+
+c
+
+```
+
+
+
+## Abeta histograms
+
+```{r}
+ggplot(study122data, aes(x=Abeta4240_Plasma_IPMS)) + 
+  geom_histogram(aes(y=..density..),fill="dodgerblue3",color="white",alpha=0.7, binwidth = 0.005) + 
+  geom_density() +
+  geom_rug() +
+  geom_vline(xintercept = 0.089) +
+  labs(x='Abeta4240_Plasma_IPMS') +
+  annotate("text", x=mean(study122data$Abeta4240_Plasma_IPMS), y=20, label = paste0("mean = ", round(mean(study122data$Abeta4240_Plasma_IPMS), 3))) +
+  theme_minimal()
+
+ggplot(study122data, aes(x=Abeta40_Plasma_IPMS)) + 
+  geom_histogram(aes(y=..density..),fill="dodgerblue3",color="white",alpha=0.7, binwidth = 50) + 
+  geom_density() +
+  geom_rug() +
+  labs(x='Abeta40_Plasma_IPMS') +
+  annotate("text", x=mean(study122data$Abeta40_Plasma_IPMS), y=0.0025, label = paste0("mean = ", round(mean(study122data$Abeta40_Plasma_IPMS), 3))) +
+  theme_minimal()
+
+ggplot(study122data, aes(x=Abeta42_Plasma_IPMS)) + 
+  geom_histogram(aes(y=..density..),fill="dodgerblue3",color="white",alpha=0.7, binwidth = 5) + 
+  geom_density() +
+  geom_rug() +
+  labs(x='Abeta42_Plasma_IPMS') +
+  annotate("text", x=mean(study122data$Abeta42_Plasma_IPMS), y=0.025, label = paste0("mean = ", round(mean(study122data$Abeta42_Plasma_IPMS), 3))) +
+  theme_minimal()
+
+
+```
+
+
+## Abeta averages tracking by batch
+
+```{r}
+
+ggplot(study122data, aes(x=batch, y=Abeta4240_Plasma_IPMS)) + 
+  geom_point() +
+  geom_smooth(method = loess) +
+  labs(y='Abeta4240_Plasma_IPMS', x = "Batch") +
+  theme_minimal()
+
+ggplot(study122data, aes(x=batch, y=Abeta40_Plasma_IPMS)) + 
+  geom_point() +
+  geom_smooth(method = loess) +
+  labs(y='Abeta40_Plasma_IPMS', x = "Batch") +
+  theme_minimal()
+
+ggplot(study122data, aes(x=batch, y=Abeta42_Plasma_IPMS)) + 
+  geom_point() +
+  geom_smooth(method = loess) +
+  labs(y='Abeta42_Plasma_IPMS', x = "Batch") +
+  theme_minimal()
+
+```
+
+
+## Abeta averages tracking by date
+
+```{r}
+
+ggplot(study122data, aes(x=rundate, y=Abeta4240_Plasma_IPMS, color = as.factor(batch))) + 
+  geom_boxplot() +
+  labs(y='Abeta4240_Plasma_IPMS', x = "Date") +
+  theme_minimal()
+
+ggplot(study122data, aes(x=rundate, y=Abeta4240_Plasma_IPMS)) + 
+  geom_point() +
+  geom_smooth(method = loess) +
+  labs(y='Abeta4240_Plasma_IPMS', x = "Date") +
+  theme_minimal()
+
+ggplot(study122data, aes(x=rundate, y=Abeta40_Plasma_IPMS)) + 
+  geom_point() +
+  geom_smooth(method = loess) +
+  labs(y='Abeta40_Plasma_IPMS', x = "Date") +
+  theme_minimal()
+
+ggplot(study122data, aes(x=rundate, y=Abeta42_Plasma_IPMS)) + 
+  geom_point() +
+  geom_smooth(method = loess) +
+  labs(y='Abeta42_Plasma_IPMS', x = "Date") +
+  theme_minimal()
+
+```
+
+## Longitudinal data
+
+
+### Abeta 40
+
+```{r fig.height=18, fig.width=14}
+
+ggplot(study122data, aes(x=as.Date(PCDTC), y=Abeta40_Plasma_IPMS, color = as.factor(SUBJID)))+
+  geom_point() +
+  facet_wrap(~ batch) +
+  geom_line(size = 0.5) +
+  theme(legend.position = "none") +
+  labs(title= NULL,
+           x = "Date of sample collection", 
+           y = "Abeta40 (pg/mL)")
+
+```
+
+
+### Abeta 42
+
+
+```{r fig.height=18, fig.width=14}
+
+ggplot(study122data, aes(x=as.Date(PCDTC), y=Abeta42_Plasma_IPMS, color = as.factor(SUBJID)))+
+  geom_point() +
+  facet_wrap(~ batch) +
+  geom_line(size = 0.5) +
+  theme(legend.position = "none") +
+  labs(title= NULL,
+           x = "Date of sample collection", 
+           y = "Abeta42 (pg/mL)")
+
+```
+
+### Abeta Ratio
+
+
+```{r fig.height=18, fig.width=14}
+
+ggplot(study122data, aes(x=as.Date(PCDTC), y=Abeta4240_Plasma_IPMS, color = as.factor(SUBJID)))+
+  geom_point() +
+  geom_hline(yintercept = 0.089) +
+  facet_wrap(~ batch) +
+  geom_line(size = 0.5) +
+  theme(legend.position = "none") +
+  labs(title= NULL,
+           x = "Date of sample collection", 
+           y = "Abeta42/40 (no unit)")
+
+```
+
+
+### Longitudinal Ratio by Visit
+
+Visits in the data set:
+
+```{r}
+
+table(study122data$VISIT)
+
+```
+
+```{r fig.height=18, fig.width=14}
+
+
+level_order = c("V3W1", "V16W27", "V29W53", "V41W77", "V42W79", "ET", "")
+
+ggplot(study122data, aes(x=factor(VISIT, level = level_order), y=Abeta4240_Plasma_IPMS, color = as.factor(SUBJID)))+
+  geom_point() +
+  geom_hline(yintercept = 0.089) +
+  facet_wrap(~ batch) +
+  geom_line(size = 0.5) +
+  theme(legend.position = "none") +
+  labs(title= NULL,
+           x = "Date of sample collection", 
+           y = "Abeta42/40 (no unit)")
+
+
+```
+
+
+
+
+
+# Get data ready for export
+
+```{r}
+currentDate = format(Sys.Date(), "%Y%m%d") 
+
+
+# For test transfer - x has to be replaced with a transfer increment
+# ** TEST TRANSFER SHOULD ONLY BE DONE WITH DUMMY DATA TO AVOID UNBLINDING **
+increment_txt = "testx"
+
+# For production transfer - x has to be replaced with a transfer increment
+increment_txt = "x"
+
+# For database lock transfer 
+increment_txt = "dblock"
+
+
+
+filename = paste0("BAN2401_G000_301_AB4042_C2N_", currentDate, "_", increment_txt, ".CSV")
+filename_for_file = paste0("BAN2401_G000_301_AB4042_C2N_", currentDate, "_", ".CSV")
+
+
+```
+
+
+Filename:
+
+**`r filename `**
+
+## Convert data from wide to long format
+
+
+```{r}
+
+# 1) Keep just the data we report
+study122data.export = study122data[, c("STUDYID", "SUBJID", "PCREFID", "PCSTAT", "PCREASND", "PCDTC", "VISIT", "Abeta40_Plasma_IPMS", "Abeta42_Plasma_IPMS", "Abeta4240_Plasma_IPMS")]
+colnames(study122data.export) = c("STUDYID", "SUBJID", "PCREFID", "PCSTAT", "PCREASND", "PCDTC", "VISIT", "AB40", "AB42", "AB4240")
+
+# 1.1) Round the ratio to 3 sig digits
+study122data.export$AB4240 = round(study122data.export$AB4240, 9)
+
+# 1.2) convert all results to text - we want to report lack of result as "" - this only works if we have the result as text string
+study122data.export$AB40 = as.character(study122data.export$AB40)
+study122data.export$AB42 = as.character(study122data.export$AB42)
+study122data.export$AB4240 = as.character(study122data.export$AB4240)
+
+
+# 2) Convert to long format
+study122data.export.long = melt(study122data.export, id.vars = c("STUDYID", "SUBJID", "PCREFID", "PCSTAT", "PCREASND", "PCDTC", "VISIT"), variable.name = "PCTESTCD", value.name = "PCORRES")
+
+# 3) Sort by SUBJID & PCREFID
+study122data.export.long = study122data.export.long[
+  with(study122data.export.long, order(SUBJID, PCREFID)),
+]
+
+
+
+
+# For QNS samples all the results are NA - but they do not want NA in the PCORRES column so we will change all NA to ""
+#study122data.export.long[which(is.na(study122data.export.long$PCORRES)), "PCORRES"] = "" 
+study122data.export.long[which(is.na(study122data.export.long$PCORRES)), ]$PCORRES = "" 
+  
+
+formattable(sample_n(study122data.export.long, 20))
+
+
+```
+
+## Add the other fields to the export file
+
+Order of fields in the output file:
+
+| Field Name | Value       |
+|------------|-------------|
+| STUDYID    | from manifest    |
+| DOMAIN     | "PC"        |
+| SITE       | first 4 characters of PCREFID |
+| SUBJID    | from manifest     |
+| PCNAM      | "C2N"       |
+| PCREFID    | dynamic     |
+| VISIT      | from manifest     |
+| PCDTC      | from manifest   |
+| PCSPEC     | "PLASMA"    |
+| PCCAT      | "BIOMARKER" |
+| PCTESTCD   | dynamic     |
+| PCORRES    | dynamic     |
+| PCORRESU   | per above   |
+| PCMETHOD   | "LC-MS/MS"  |
+| PCSTAT     | dynamic     |
+| PCREASND   | dynamic     |
+| PCTEST     | dynamic based on above, see table below |
+| PCLLOQ     | based on analyte |
+| PCULOQ     | based on analyte |
+| PCSPCCND   | ""          | 
+| FILENAME   | static = filename_for_file |
+
+
+
+Test codes and test names:
+
++---------------+------------------------------------+----------------+
+| PCTESTCD      | PCTEST                             | PCORRESU       |
++===============+====================================+================+
+| AB42          | C2N Abeta 42 concentration         | pg/mL          |
++---------------+------------------------------------+----------------+
+| AB40          | C2N Abeta 40 concentration         | pg/mL          |
++---------------+------------------------------------+----------------+
+| AB4240        | C2N Abeta 42/40 ratio              |                |
++---------------+------------------------------------+----------------+
+
+
+
+```{r}
+# STATIC ONES FIRST:
+study122data.export.long$DOMAIN   = "PC"
+#study122data.export.long$SITE     = ""
+study122data.export.long$PCNAM    = "C2N" 
+study122data.export.long$PCSPEC   = "PLASMA"  
+study122data.export.long$PCCAT    = "BIOMARKER"
+study122data.export.long$PCMETHOD = "LC-MS/MS"
+study122data.export.long$PCSPCCND = ""
+study122data.export.long$FILENAME = filename_for_file
+
+
+# SITEID is the first 4 characters of SUBJID
+study122data.export.long$SITE = substr(study122data.export.long$SUBJID , 1, 4)
+
+# UNIT DEPENDS ON PCTESTCD
+study122data.export.long$PCORRESU = "" 
+study122data.export.long$PCORRESU[which(study122data.export.long$PCTESTCD == "AB42" | study122data.export.long$PCTESTCD == "AB40")] = "pg/mL"
+
+# PCTEST depends on PCTESTCD
+study122data.export.long = study122data.export.long %>% 
+  mutate(PCTEST = case_when(
+    .$PCTESTCD == "AB42" ~ "C2N Abeta 42 concentration",
+    .$PCTESTCD == "AB40" ~ "C2N Abeta 40 concentration",
+    .$PCTESTCD == "AB4240" ~ "C2N Abeta 42/40 ratio",
+    TRUE ~ ""
+  )
+)
+
+
+# PCLLOQ depends on PCTESTCD
+study122data.export.long = study122data.export.long %>% 
+  mutate(PCLLOQ = case_when(
+    .$PCTESTCD == "AB42" ~ "2",
+    .$PCTESTCD == "AB40" ~ "11",
+    TRUE ~ ""
+  )
+)
+
+# PCULOQ depends on PCTESTCD
+study122data.export.long = study122data.export.long %>% 
+  mutate(PCULOQ = case_when(
+    .$PCTESTCD == "AB42" ~ "3920",
+    .$PCTESTCD == "AB40" ~ "26400",
+    TRUE ~ ""
+  )
+)
+
+
+# WE ALSO HAVE TO IMPLEMENT THESE LIMITS:
+# 1) convert all results to character but keep as values in study122data.export.long$PCORRES_NUM
+study122data.export.long$PCORRES_NUM = as.numeric(study122data.export.long$PCORRES)
+#study122data.export.long$PCORRES = as.character(study122data.export.long$PCORRES)
+
+study122data.export.long[which((study122data.export.long$PCTESTCD == "AB42" & study122data.export.long$PCORRES_NUM < 2) | 
+                               (study122data.export.long$PCTESTCD == "AB40" & study122data.export.long$PCORRES_NUM < 11)), "PCORRES"] = "BLQ"
+
+study122data.export.long[which((study122data.export.long$PCTESTCD == "AB42" & study122data.export.long$PCORRES_NUM > 3920) | 
+                               (study122data.export.long$PCTESTCD == "AB40" & study122data.export.long$PCORRES_NUM > 26400)), "PCORRES"] = "ALQ"
+
+
+sampleswithinvalidratios = unlist(study122data.export.long[which((study122data.export.long$PCORRES == "BLQ") | (study122data.export.long$PCORRES == "ALQ")), "PCREFID"])
+
+study122data.export.long[which(study122data.export.long$PCREFID %in% sampleswithinvalidratios & study122data.export.long$PCTESTCD == "AB4240"), "PCSTAT"] = "ND"
+study122data.export.long[which(study122data.export.long$PCREFID %in% sampleswithinvalidratios & study122data.export.long$PCTESTCD == "AB4240"), "PCREASND"] = "Ratio cannot be calculated"
+study122data.export.long[which(study122data.export.long$PCREFID %in% sampleswithinvalidratios & study122data.export.long$PCTESTCD == "AB4240"), "PCORRES"] = NA
+study122data.export.long[which(study122data.export.long$PCREFID %in% sampleswithinvalidratios & study122data.export.long$PCTESTCD == "AB4240"),]
+
+
+```
+
+Sites:
+
+```{r}
+table(study122data.export.long$SITE)
+```
+
+
+```{r}
+# ORDER THE COLUMNS
+
+
+col_order = c("STUDYID", 
+              "SITE", 
+              "SUBJID", 
+              "VISIT",
+              "DOMAIN", 
+              "PCCAT",
+              "PCDTC",
+              "PCREFID", 
+              "PCNAM", 
+              "PCTESTCD",
+              "PCTEST",
+              "PCORRES",
+              "PCORRESU",
+              "PCLLOQ",
+              "PCULOQ",
+              "PCMETHOD",
+              "PCSPEC",
+              "PCSPCCND",
+              "PCSTAT",
+              "PCREASND",
+              "FILENAME"
+              )
+
+# Should be 21
+
+
+
+```
+
+
+## Depending on type of transfer - clear the results
+
+If not dblock or testx (is: `r increment_txt `) - then clear:
+
+* PCORRES
+* PCSTAT
+* PCREASND
+
+Per DTA we will only provide these variables in test transfer and in dblock transfer.
+
+```{r}
+
+nullvalue = ""
+
+if (increment_txt != "dblock" & increment_txt != "testx") {
+  
+  study122data.export.long$PCORRES = nullvalue
+  study122data.export.long$PCSTAT = nullvalue
+  study122data.export.long$PCREASND = nullvalue
+  
+}
+
+paged_table(head(study122data.export.long))
+
+```
+
+## Sorted data for export
+
+
+```{r}
+study122data.export.long.sort = subset(study122data.export.long, select = col_order)
+
+paged_table(study122data.export.long.sort)
+  
+```
+
+
+
+Number of samples in final file:
+
+```{r}
+
+length(study122data$PCREFID)
+
+```
+
+Number of lines in the long export file divided by 3 since there are 3 results per sample.
+
+```{r}
+
+length(study122data.export.long.sort$SUBJID)/3
+
+```
+
+
+
+```{r message=FALSE}
+
+## TEST
+# BAN2401_TEST_C2N_BM_FULL_YYYYMMDDX.csv f
+
+## PROD
+# BAN2401_PROD_C2N_BM_FULL_YYYYMMDDX.csv 
+
+write.csv(study122data.export.long.sort, filename, row.names=FALSE)
+
+message(paste0("Data export saved to: ", filename))
+message(paste0("Time to run this code: ", difftime(Sys.time(), now)))
+
+```
+
+
+
+
+

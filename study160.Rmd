@@ -1,0 +1,208 @@
+---
+title: "STUDY160 - Interim Unaudited Analysis"
+author: "C2N Diagnostics - proprietary and confidential information. Not to be copied or distributed without C2N written consent."
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+
+now <<- Sys.time()
+
+library(rmarkdown)
+library(ggplot2)
+library(pROC)
+library(data.table)
+library(caret)
+library(plyr)
+library(dplyr)
+library(ggpubr)
+library(expss)
+library(ggforce)
+library(gridExtra)
+# visualizing the effects of variables in a GLM
+library(effects)
+library(Matrix)
+
+# For nicer looking html tables
+library(formattable)
+library(readxl)
+
+# For summary tables
+library(qwraps2)
+options(qwraps2_markup = "markdown")
+
+library(DiagrammeR)
+#http://rich-iannone.github.io/DiagrammeR/graphviz_and_mermaid.html
+#https://bookdown.org/yihui/rmarkdown-cookbook/diagrams.html
+
+
+
+
+# Plot & visualization
+theme_new <- function(base_size = 12, base_family = ""){
+  theme_bw(base_size = base_size, base_family = base_family) %+replace%
+    theme(
+      legend.key=element_rect(colour=NA, fill =NA),
+      panel.grid = element_blank(),   
+      panel.border = element_rect(fill = NA, colour = "black", size=1),
+      panel.background = element_rect(fill = "white", colour = "black"), 
+      strip.background = element_rect(fill = NA)
+    )
+}
+
+theme_set(theme_new(base_size = 16))
+
+
+printpct = function(percentage) {
+  percentage = as.numeric(percentage)
+  
+  if (is.na(percentage) | percentage == 0)
+    return("-")
+  else
+    return(paste0(percentage, "%"))
+}
+
+categorize_aps = function (APS) {
+  
+  if (is.na(APS)) {
+    return(NA)
+  }
+  
+  if (APS <= 35) {
+    return("Low")
+  } else if (APS >= 58) {
+    return("High")
+  } else {
+    return("Intermediate")
+  }
+  
+}
+
+
+```
+
+
+```{r}
+abetadata = read_xlsx("../Lab Data/Study160_Combined Abeta Data.xlsx", col_types = c("text"))
+colnames(abetadata) = c("Batch", "Accession", "Abeta_40", "Abeta_42", "ratio_excel", "Comments")
+
+# convert results to numbers
+abetadata$Abeta_40 = as.numeric(abetadata$Abeta_40)
+abetadata$Abeta_42 = as.numeric(abetadata$Abeta_42)
+abetadata$Abeta_ratio = abetadata$Abeta_42 / abetadata$Abeta_40
+
+
+manifest = read_xlsx("../Sample Management/manifest for sarah-clean.xlsx")
+colnames(manifest) = c("Study", "SampleID", "Patient_ID", "Accession", "Patient_number", "Position", "Notes")
+
+study160data = merge(abetadata, manifest, all.x = T)
+
+study160data = study160data[, c("Study", "Patient_ID", "SampleID", "Accession", "Abeta_40", "Abeta_42", "Abeta_ratio")]
+
+paged_table(study160data)
+```
+
+They mixed accession numbers and sample numbers in the manifest and in the Abeta file - we need to fix this
+
+```{r}
+
+paste0("Number of data points: ", length(abetadata$Accession))
+
+# 1) Merge in based on accession number
+study160data.accessionnumber = merge(abetadata, manifest)
+study160data.accessionnumber = study160data.accessionnumber[, c("Study", "Patient_ID", "SampleID", "Accession", "Abeta_40", "Abeta_42", "Abeta_ratio")]
+
+
+# 2) Merge in based on SampleID
+manifest2 = manifest
+colnames(manifest2) = c("Study", "Accession", "Patient_ID", "SampleID", "Patient_number", "Position", "Notes")
+study160data.sampleid = merge(abetadata, manifest2)
+study160data.sampleid = study160data.sampleid[, c("Study", "Patient_ID", "SampleID", "Accession", "Abeta_40", "Abeta_42", "Abeta_ratio")]
+
+paste0("Combined datapoints from two independent merges: ", length(study160data.accessionnumber$Accession) + length(study160data.sampleid$Accession))
+
+# 3) combine and remove duplicates that
+study160data = rbind(study160data.accessionnumber, study160data.sampleid)
+study160data = study160data[!duplicated(study160data), ]
+
+paste0("Number of unique points after merge with manifest and removing duplicates: ", length(study160data$Accession))
+
+if (length(study160data$Accession) != length(abetadata$Accession)) {
+
+  print("Merge did not work")
+    
+  knitr::knit_exit()
+  
+}
+
+
+
+
+```
+
+How did merge go? List of samples with missing patient id:
+
+```{r}
+
+study160data[which(is.na(study160data$Patient_ID)), ]
+
+```
+
+Prepare data for export
+
+
+Study
+Patient ID
+Abeta 40 
+Abeta 40 units
+Abeta 42
+Abeta 42 units 
+Abeta ratio 
+Phosphorylated Tau181
+Phosphorylated Tau181 units
+non-phosphorylated Tau181  
+non-phosphorylated Tau181 units
+p-Tau181/non-p-Tau181 ratio
+Phosphorylated Tau217 
+Phosphorylated Tau217 units 
+non-phosphorylated Tau217 
+non-phosphorylated Tau217 units 
+p-Tau217/non-p- Tau181 ratio
+
+```{r}
+
+study160data$Abeta_40_units = "pg/mL"
+study160data$Abeta_42_units = "pg/mL"
+
+study160data$ptau181 = "" 
+study160data$ptau181_units = "pg/mL" 
+study160data$nptau181 = "" 
+study160data$nptau181_units = "pg/mL" 
+study160data$ptau181ratio = "" 
+
+study160data$ptau217 = "" 
+study160data$ptau217_units = "pg/mL" 
+study160data$nptau217 = "" 
+study160data$nptau217_units = "pg/mL" 
+study160data$ptau217ratio = "" 
+
+
+
+study160data.export = study160data[, c("Study", "Patient_ID", "Abeta_40", "Abeta_40_units", "Abeta_42", "Abeta_40_units", "Abeta_ratio", "ptau181", "ptau181_units", "nptau181", "nptau181_units", "ptau181ratio", "ptau217", "ptau217_units", "nptau217", "nptau217_units", "ptau217ratio")]
+
+colnames(study160data.export) = c("Study", "Patient ID", "Abeta 40 ", "Abeta 40 units", "Abeta 42", "Abeta 42 units ", "Abeta ratio ", "Phosphorylated Tau181", "Phosphorylated Tau181 units", "non-phosphorylated Tau181  ", "non-phosphorylated Tau181 units", "p-Tau181/non-p-Tau181 ratio", "Phosphorylated Tau217 ", "Phosphorylated Tau217 units ", "non-phosphorylated Tau217 ", "non-phosphorylated Tau217 units ", "p-Tau217/non-p- Tau181 ratio")
+
+write.csv(study160data.export, "C2N_Biomarkers.csv", row.names=FALSE)
+
+```
+
+
+
+

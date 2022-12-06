@@ -1,0 +1,235 @@
+---
+title: "STUDY149: DRAFT Interim Data Analysis"
+author: "C2N Diagnostics - proprietary and confidential information. Not to be copied or distributed without C2N written consent."
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: default
+    toc: true
+    toc_float: true
+    number_sections: true
+
+---
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+
+now <<- Sys.time()
+
+library(ggplot2)
+library(pROC)
+library(data.table)
+library(caret)
+library(plyr)
+library(dplyr)
+library(ggpubr)
+library(expss)
+library(ggforce)
+library(gridExtra)
+# visualizing the effects of variables in a GLM
+library(effects)
+library(Matrix)
+library(readxl)
+library(tidyr)
+library(stringr)
+
+library(DiagrammeR)
+#http://rich-iannone.github.io/DiagrammeR/graphviz_and_mermaid.html
+#https://bookdown.org/yihui/rmarkdown-cookbook/diagrams.html
+
+library(usmap)
+
+library(formattable)
+#library(tidyr)
+
+library(gridExtra)
+library(qwraps2)
+options(qwraps2_markup = "markdown")
+
+
+printpct = function(percentage) {
+  if (percentage > 0)
+    return(paste0(percentage, "%"))
+  else
+    return("-")
+}
+
+# Plot & visualization
+theme_new <- function(base_size = 12, base_family = ""){
+  theme_bw(base_size = base_size, base_family = base_family) %+replace%
+    theme(
+      legend.key=element_rect(colour=NA, fill =NA),
+      panel.grid = element_blank(),   
+      panel.border = element_rect(fill = NA, colour = "black", size=1),
+      panel.background = element_rect(fill = "white", colour = "black"), 
+      strip.background = element_rect(fill = NA)
+    )
+}
+theme_set(theme_new(base_size = 16))
+
+categorize_aps = function (APS) {
+  
+  if (APS <= 35) {
+    return("Low")
+  } else if (APS >= 58) {
+    return("High")
+  } else {
+    return("Intermediate")
+  }
+  
+}
+
+categorize_eligibility  = function (APS) {
+  if (APS <= 35) {
+    return("NO")
+  } else if (APS >=36) {
+    return("YES")
+  } else {
+    return("")
+  }
+}
+
+
+folder = "Manifests/"
+
+filenames = dir(folder, pattern = "csv", full.names = F, ignore.case = TRUE)
+
+manifest_data = data.frame()
+
+for (filename in filenames) {
+  
+  manifest_data_vals = read.csv(paste0(folder, filename))
+  #manifest_data_vals$batchdate = substr(filename, 41, 50)
+  manifest_data = rbind(manifest_data, manifest_data_vals)
+}
+#Change name of input Abeta file
+study153AbetaData = read.csv("Abeta Data/PRECIVITYAbetaReport_Sheet1_20221116114658.csv", skip=7)#, col_types = c("text", "text", "text", "text", "text", "text", "text", "text", "text", "text", "numeric", "text", "numeric", "numeric", "text", "numeric", "text", "text", "text", "numeric"))
+colnames(study153AbetaData)=c("Sample Raw File Name", "Sample Type", "ID", "Sample Name", "Sample Vial Position", "Sample Level", "Sample Acquisition Date", "Compound Name", "Compound Type", "Integration Mode", "Retention Time", "Theoretical Amount", "Calculated Amount", "Peak Area", "ISTD Area", "ISTD Actual Rt", "All Flag Details", "Excluded", "Exclusion Reason", "Dilution Factor")
+
+#Change name of input ApoE file
+study153ApoEData = read.csv("ApoE Data/2022-11-16_results.csv")#, col_types = c("numeric", "numeric", "text", "text", "numeric", "numeric", "numeric", "text", "numeric", "text", "numeric", "text", "numeric", "text", "numeric", "text", "numeric", "text", "numeric", "text", "numeric", "text"))
+colnames(study153ApoEData)=c("", "LBREFID", "Proteotype")
+
+colnames(manifest_data)=c("Protocol Name", "Date of Birth", "SUBJID", "Site Number", "LBREFID", "VISIT", "Visit Type", "LBDTC", "Collection Time", "Tube Comments")
+
+Abeta_Big_Subset = study153AbetaData[, c('Sample Raw File Name', 'Compound Name', 'Calculated Amount')]
+
+Abeta_Subset = Abeta_Big_Subset[grepl("Abeta_Study153",Abeta_Big_Subset$`Sample Raw File Name`),]
+
+ApoE_Subset = study153ApoEData[, c('LBREFID', 'Proteotype')]
+
+Abeta_Wide = spread(Abeta_Subset, 'Compound Name', 'Calculated Amount')
+
+Abeta_Wide[c('sub1', 'sub2', 'sub3', 'LBREFID')] <-str_split_fixed(Abeta_Wide$`Sample Raw File Name`, '_', 4)
+
+Abeta = Abeta_Wide[c('LBREFID', 'Abeta_40', 'Abeta_42')]
+
+colnames(Abeta)=c("LBREFID", "Abeta40_Plasma_IPMS", "Abeta42_Plasma_IPMS")
+
+#manifest_data$`LBDTC` = format(manifest_data$`LBDTC`, "%Y-%m-%d")
+
+manifest_data$"Year of Birth" = substring(manifest_data$`Date of Birth`, nchar(manifest_data$`Date of Birth`)-1, nchar(manifest_data$`Date of Birth`))
+manifest_data$`Year of Birth` = as.numeric(manifest_data$`Year of Birth`)
+manifest_data$`Year of Birth` = manifest_data$`Year of Birth` + 1900
+
+manifest_data$"Year of Collection" = substring(manifest_data$LBDTC, nchar(manifest_data$LBDTC)-1, nchar(manifest_data$LBDTC))
+manifest_data$`Year of Collection` = as.numeric(manifest_data$`Year of Collection`)
+manifest_data$`Year of Collection` = manifest_data$`Year of Collection` + 2000
+
+manifest_data$age = manifest_data$"Year of Collection" - manifest_data$"Year of Birth"
+
+#manifest_data[c('USUBJID', 'leftover')] <-str_split_fixed(manifest_data$USUBJID_long, ',', 2)
+
+manifest_subset = manifest_data[, c("Year of Birth", "SUBJID", "LBREFID", "VISIT", "LBDTC", "age")]
+
+#manifest_subset$matchcol = substring(manifest_subset$LBREFID, 1, nchar(manifest_subset$LBREFID)-3)
+
+Mass_Data = merge(x=Abeta, y=ApoE_Subset, by = "LBREFID", all.x = TRUE)
+
+study153data = merge(x=Mass_Data, y=manifest_subset, by = "LBREFID")
+
+study153data$Abeta40_Plasma_IPMS = as.numeric(study153data$Abeta40_Plasma_IPMS)
+study153data$Abeta42_Plasma_IPMS = as.numeric(study153data$Abeta42_Plasma_IPMS)
+
+
+study153data$STAT   = ""
+study153data$REASND = "" 
+
+# Calculate ratio
+study153data$Abeta4240_Plasma_IPMS = study153data$Abeta42_Plasma_IPMS/study153data$Abeta40_Plasma_IPMS
+
+# count apoE4 alleles
+study153data$apoe4copynr = 0
+study153data$apoe4copynr[is.na(study153data$Proteotype)] = NA
+study153data$apoe4copynr[study153data$Proteotype == "E2/E4"] = 1
+study153data$apoe4copynr[study153data$Proteotype == "E3/E4"] = 1
+study153data$apoe4copynr[study153data$Proteotype == "E4/E4"] = 2
+# E4 presence
+study153data$apoe4present = (study153data$apoe4copynr > 0)
+
+# count apoE2 alleles
+study153data$apoe2copynr = 0
+study153data$apoe2copynr[is.na(study153data$Proteotype)] = NA
+study153data$apoe2copynr[study153data$Proteotype == "E2/E2"] = 2
+study153data$apoe2copynr[study153data$Proteotype == "E2/E3"] = 1
+study153data$apoe2copynr[study153data$Proteotype == "E2/E4"] = 1
+# E2 presence
+study153data$apoe2present = (study153data$apoe2copynr > 0)
+
+
+```
+
+
+
+# APS Calculation
+
+Load CLIA model and calculate APS result for all patients
+
+```{r}
+
+# Load the model
+model = readRDS("model.clia3_25.rds")
+
+
+# Calculate the response of the model given the new data
+study153data$APS = round(predict(model, newdata = study153data, type='response') * 100)
+
+# Assign category
+study153data$"APS Category" = sapply(study153data$APS, categorize_aps)
+
+study153data$Eligibility = sapply(study153data$APS, categorize_eligibility)
+
+
+hist(study153data$APS )
+
+```
+
+```{r}
+table(study153data$APS_Category)
+```
+
+```{r}
+
+table(study153data$Proteotype)
+```
+```{r}
+# Keep just the data we report
+study153data.export = study153data[, c("SUBJID", "VISIT", "LBDTC", "LBREFID", "STAT", "REASND", "age", "APS", "APS Category", "Eligibility", "Abeta42_Plasma_IPMS", "Abeta40_Plasma_IPMS", "Abeta4240_Plasma_IPMS", "Proteotype")]
+colnames(study153data.export) = c("SUBJID", "VISIT", "LBDTC", "LBREFID", "STAT", "REASND", "Age", "APS", "APS Category", "Eligibility", "Abeta42", "Abeta40", "Abeta4240", "ApoE")
+```
+
+# Export
+
+```{r}
+# ORDER THE COLUMNS
+#col_order = c("STUDYID", "DOMAIN", "SITE", "USUBJID", "LBNAM", "LBREFID", "VISIT", "LBDTC", "LBSPEC", "LBCAT", "LBTESTCD", "LBORRES", "LBORRESU", "LBMETHOD", "LBSTAT", "LBREASND")
+#study166data.export.long.sort = study166data.export.long[, ..col_order]
+
+currentDate = format(Sys.Date(), "%Y%m%d")
+filename = paste0("Apheleia_Data_", currentDate, ".csv")
+write.csv(study153data.export, filename, row.names = FALSE)
+
+```

@@ -1,0 +1,756 @@
+---
+title: "STUDY138 - Interim Unaudited Analysis"
+author: "C2N Diagnostics - proprietary and confidential information. Not to be copied or distributed without C2N written consent."
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+
+now <<- Sys.time()
+
+library(rmarkdown)
+library(ggplot2)
+library(pROC)
+library(data.table)
+library(caret)
+library(plyr)
+library(dplyr)
+library(ggpubr)
+library(expss)
+library(ggforce)
+library(gridExtra)
+# visualizing the effects of variables in a GLM
+library(effects)
+library(Matrix)
+library(readxl)
+
+# For nicer looking html tables
+library(formattable)
+
+# For summary tables
+library(qwraps2)
+options(qwraps2_markup = "markdown")
+
+library(DiagrammeR)
+#http://rich-iannone.github.io/DiagrammeR/graphviz_and_mermaid.html
+#https://bookdown.org/yihui/rmarkdown-cookbook/diagrams.html
+
+
+
+
+# Plot & visualization
+theme_new <- function(base_size = 12, base_family = ""){
+  theme_bw(base_size = base_size, base_family = base_family) %+replace%
+    theme(
+      legend.key=element_rect(colour=NA, fill =NA),
+      panel.grid = element_blank(),   
+      panel.border = element_rect(fill = NA, colour = "black", size=1),
+      panel.background = element_rect(fill = "white", colour = "black"), 
+      strip.background = element_rect(fill = NA)
+    )
+}
+
+theme_set(theme_new(base_size = 16))
+
+
+printpct = function(percentage) {
+  percentage = as.numeric(percentage)
+  
+  if (is.na(percentage) | percentage == 0)
+    return("-")
+  else
+    return(paste0(percentage, "%"))
+}
+
+categorize_aps = function (APS) {
+  
+  if (is.na(APS)) {
+    return(NA)
+  }
+  
+  if (APS <= 35) {
+    return("Low")
+  } else if (APS >= 58) {
+    return("High")
+  } else {
+    return("Intermediate")
+  }
+  
+}
+
+```
+
+# Load the data
+
+```{r}
+
+
+
+```
+
+
+
+## Mass spec data
+
+```{r }
+
+# JOSH CHANGE THIS NUMBER:
+maxfile = 34
+
+# HOW MANY FILES TO IMPORT
+filenos = seq(2, maxfile, 1)
+#filenos = c(filenos, 12)
+
+abetadata = read_excel("biobankedsamples/Study138_Abeta_Results_Run_1.xlsx")
+abetadata$batch = 1
+
+apoedata  = read_excel("biobankedsamples/Study138_ApoE_Results_Run_1.xlsx")
+
+samplesperfile = data.frame("Batch" = 1, "Abeta" = length(abetadata$`Plasma Barcodes`), "ApoE" = length(apoedata$`Plasma Barcodes`))
+
+for (fileno in filenos) {
+
+  newabetadata = read_excel(paste0("biobankedsamples/Study138_Abeta_Results_Run_", fileno, ".xlsx"))
+  newabetadata$batch = fileno
+  abetadata = rbind(abetadata, newabetadata)
+  
+  newapoedata = read_excel(paste0("biobankedsamples/Study138_ApoE_Results_Run_", fileno, ".xlsx"))
+  apoedata  = rbind(apoedata, newapoedata)
+  
+  samplesperfile = rbind(samplesperfile, data.frame("Batch" = fileno, "Abeta" = length(newabetadata$`Plasma Barcodes`), "ApoE" = length(newapoedata$`Plasma Barcodes`)))
+
+}
+
+colnames(abetadata) = c("LBREFID", "Abeta40_Plasma_IPMS", "Abeta42_Plasma_IPMS", "Abeta4240_Plasma_IPMS_excel", "Abeta_comment", "batch")
+colnames(apoedata) = c("LBREFID", "Proteotype", "ApoE_comment")
+
+#length(unique(abetadata$LBREFID))
+#length(unique(apoedata$LBREFID))
+
+study138data.c2n = merge(abetadata, apoedata)
+
+```
+
+Number of samples per batch for Abeta and ApoE
+
+```{r}
+formattable(samplesperfile)
+```
+
+Total number of samples
+
+```{r}
+
+length(study138data.c2n$LBREFID)
+
+```
+
+## Age file
+
+```{r }
+#study138data.atri = read_excel("TRCPAD_Participant_Age_20220119.xlsx")
+
+# Download at"
+# https://trc.atrihub.org/document_repository/t/transfer-c2n-outbound
+
+#study138data.atri = read.csv("TRCPAD_Participant_Age_20220214.csv")
+#study138data.atri = read.csv("TRCPAD_Participant_Age_20220228.csv")
+#study138data.atri = read.csv("TRCPAD_Participant_Age_20220502.csv")
+study138data.atri = read.csv("TRCPAD_Participant_Age_List.csv")
+
+colnames(study138data.atri) = c("USUBJID","LBREFID", "age")
+
+```
+
+Number of patients in age file
+
+```{r}
+
+length(study138data.atri$LBREFID)
+
+study138data.atri$age = as.numeric(study138data.atri$age)
+
+
+```
+
+
+
+### Differences between age file and MS data
+
+```{r}
+
+if (length(study138data.atri$LBREFID) < length(study138data.c2n$LBREFID)) {
+  
+  print(paste0("There are less patients in the age file than in the MS file"))
+#  knitr::knit_exit()  
+  
+} else if (length(study138data.atri$LBREFID) > length(study138data.c2n$LBREFID)) {
+
+  print(paste0("There are more patients in the age file than in the MS file"))
+#  knitr::knit_exit()  
+
+}
+  
+```
+
+#### Samples in the C2N set not ATRI set:
+
+
+LBREFIDs:
+
+```{r}
+delta = sort(setdiff(study138data.c2n$LBREFID, study138data.atri$LBREFID))
+delta
+```
+
+Number of samples:
+
+```{r}
+length(setdiff(study138data.c2n$LBREFID, study138data.atri$LBREFID))
+```
+
+Number of samples per batch:
+
+```{r}
+table(study138data.c2n[which(study138data.c2n$LBREFID %in% delta), c("batch")])
+```
+
+#### Samples in ATRI set not in C2N set:
+
+LBREFIDs:
+
+```{r}
+sort(setdiff(study138data.atri$LBREFID, study138data.c2n$LBREFID))
+```
+
+Number of samples:
+
+
+```{r}
+length(setdiff(study138data.atri$LBREFID, study138data.c2n$LBREFID))
+
+```
+
+
+
+
+## Merge the data
+
+Merge age and mass spec data
+
+```{r }
+
+study138data = merge(study138data.c2n, study138data.atri, all.x = T)
+
+study138data$LBSTAT   = ""
+study138data$LBREASND = ""  
+
+```
+
+
+
+## Abeta comments:
+
+```{r}
+study138data$Abeta_comment[which(study138data$Abeta_comment == "")] = NA
+study138data$ApoE_comment[which(study138data$ApoE_comment == "")] = NA
+```
+
+```{r}
+
+paste0("Number of comments: ", sum(as.numeric(!is.na(study138data$Abeta_comment))))
+
+formattable(table(study138data$Abeta_comment))
+
+```
+
+
+
+
+
+## ApoE comments:
+
+```{r}
+
+paste0("Number of comments: ", sum(as.numeric(!is.na(study138data$ApoE_comment))))
+
+formattable(table(study138data$ApoE_comment))
+
+```
+
+## Samples in analysis
+
+For all samples with sample comments - set the results to NA
+
+```{r}
+
+sampleswithqns = which(!is.na(study138data$Abeta_comment) | !is.na(study138data$ApoE_comment))
+
+paste0("Number of samples: ", length(study138data$LBREFID), ", samples with comments: ", length(sampleswithqns))
+
+study138data[sampleswithqns, c("Abeta40_Plasma_IPMS", "Abeta42_Plasma_IPMS", "Abeta4240_Plasma_IPMS", "Proteotype")] = NA
+
+# Set status and reason not done
+study138data[sampleswithqns, c("LBSTAT")] = "ND"
+study138data[sampleswithqns, c("LBREASND")] = "QNS"
+
+```
+
+
+# Compute APS on the data
+
+```{r}
+# Convert "N/A" to NA
+study138data$Abeta40_Plasma_IPMS[which(study138data$Abeta40_Plasma_IPMS == "N/A")] = NA
+study138data$Abeta42_Plasma_IPMS[which(study138data$Abeta42_Plasma_IPMS == "N/A")] = NA
+
+# Then convert to numbers
+study138data$Abeta40_Plasma_IPMS = as.numeric(study138data$Abeta40_Plasma_IPMS)
+study138data$Abeta42_Plasma_IPMS = as.numeric(study138data$Abeta42_Plasma_IPMS)
+
+
+# Make sure we have complete data for APS calculation
+#study138data = study138data[complete.cases(study138data[ , c("Abeta40_Plasma_IPMS", "Abeta40_Plasma_IPMS")]),]
+
+
+# TODO: setup a function that will do this
+study138data$Abeta4240_Plasma_IPMS = study138data$Abeta42_Plasma_IPMS / study138data$Abeta40_Plasma_IPMS
+
+# count apoE4 alleles
+study138data$apoe4copynr = 0
+study138data$apoe4copynr[is.na(study138data$Proteotype)] = NA
+study138data$apoe4copynr[study138data$Proteotype == "E2/E4"] = 1
+study138data$apoe4copynr[study138data$Proteotype == "E3/E4"] = 1
+study138data$apoe4copynr[study138data$Proteotype == "E4/E4"] = 2
+# E4 presence
+study138data$apoe4present = (study138data$apoe4copynr > 0)
+
+# count apoE2 alleles
+study138data$apoe2copynr = 0
+study138data$apoe2copynr[is.na(study138data$Proteotype)] = NA
+study138data$apoe2copynr[study138data$Proteotype == "E2/E2"] = 2
+study138data$apoe2copynr[study138data$Proteotype == "E2/E3"] = 1
+study138data$apoe2copynr[study138data$Proteotype == "E2/E4"] = 1
+# E2 presence
+study138data$apoe2present = (study138data$apoe2copynr > 0)
+```
+
+Samples where we cannot calculate APS:
+
+```{r}
+
+paste0("Samples with no age: ", length(which(is.na(study138data$age))))
+paste0("Samples with no apoe4copynr: ", length(which(is.na(study138data$apoe4copynr))))
+paste0("Samples with no Abeta4240_Plasma_IPMS: ", length(which(is.na(study138data$Abeta4240_Plasma_IPMS))))
+
+```
+
+
+```{r}
+# Load the model
+model = readRDS("model.clia3_25.rds")
+
+# Calculate the response of the model given the new data
+study138data$APS = round(predict(model, newdata = study138data, type='response') * 100)
+
+# APS = -1 means no age information or age below 40
+study138data$APS[which(is.na(study138data$age))] = -1
+study138data$APS[which(study138data$age < 40)] = -1
+
+```
+
+6 random entries for testing APS calculation manually
+
+```{r}
+
+study138data[sample(6), c("LBREFID", "Abeta4240_Plasma_IPMS", "Abeta42_Plasma_IPMS", "Abeta40_Plasma_IPMS", "Proteotype", "age", "APS", "LBREASND")]
+
+```
+
+
+```{r}
+# Assign category
+study138data$APS_Category = sapply(study138data$APS, categorize_aps)
+
+table(study138data$APS_Category)
+
+```
+
+
+
+# Data review
+
+```{r}
+
+# EXPORT study120data FOR CLIA MODEL
+studyid = "STUDY138"
+modeldata = study138data[, c("age", "Proteotype", "apoe4copynr", "apoe2copynr", "Abeta42_Plasma_IPMS", "Abeta40_Plasma_IPMS", "Abeta4240_Plasma_IPMS")]
+
+modeldata$race = NA
+modeldata$ethnicity = NA
+modeldata$gender = NA
+modeldata$id = paste0(studyid, "_", study138data$LBREFID)
+modeldata$cohort = studyid
+#visual read positive - in this case not VR 
+modeldata$amyloidpositive = NA
+modeldata$centiloid = NA
+modeldata$MMSE = NA
+modeldata$CDR = NA
+modeldata$tracer = "Navidea"
+modeldata$diagnosis_desc = NA
+modeldata$state = "NA"
+
+write.csv(modeldata, paste0("small_model_data_", studyid, ".csv"))
+
+
+```
+
+
+
+## Demographics
+
+```{r results='asis'}
+
+demographics_table = 
+  list(
+        "Age" = 
+    list("Mean (sd)" = ~ qwraps2::mean_sd(na.omit(.data$age), denote_sd = "paren", digits = 1),
+         "Range" = ~ paste0(round(min(na.omit(.data$age)), 1), "-", round(max(na.omit(.data$age)), 1))
+         ),
+
+        "ApoE" = 
+    list("E2/E2" = ~ paste0(sum(as.numeric(.data$Proteotype == "E2/E2"), na.rm = t), " (", printpct(round(sum(as.numeric(.data$Proteotype == "E2/E2"), na.rm = t)/length(na.omit(.data$Proteotype))*100.0, 1) ), ")"  ) ,
+         "E2/E3" = ~ paste0(sum(as.numeric(.data$Proteotype == "E2/E3"), na.rm = t), " (", printpct(round(sum(as.numeric(.data$Proteotype == "E2/E3"), na.rm = t)/length(na.omit(.data$Proteotype))*100.0, 1) ), ")"  ) ,
+         "E2/E4" = ~ paste0(sum(as.numeric(.data$Proteotype == "E2/E4"), na.rm = t), " (", printpct(round(sum(as.numeric(.data$Proteotype == "E2/E4"), na.rm = t)/length(na.omit(.data$Proteotype))*100.0, 1) ), ")"  ) ,
+         "E3/E3" = ~ paste0(sum(as.numeric(.data$Proteotype == "E3/E3"), na.rm = t), " (", printpct(round(sum(as.numeric(.data$Proteotype == "E3/E3"), na.rm = t)/length(na.omit(.data$Proteotype))*100.0, 1) ), ")"  ) ,
+         "E3/E4" = ~ paste0(sum(as.numeric(.data$Proteotype == "E3/E4"), na.rm = t), " (", printpct(round(sum(as.numeric(.data$Proteotype == "E3/E4"), na.rm = t)/length(na.omit(.data$Proteotype))*100.0, 1) ), ")"  ) ,
+         "E4/E4" = ~ paste0(sum(as.numeric(.data$Proteotype == "E4/E4"), na.rm = t), " (", printpct(round(sum(as.numeric(.data$Proteotype == "E4/E4"), na.rm = t)/length(na.omit(.data$Proteotype))*100.0, 1) ), ")"  )
+         ),
+
+    
+          "APS Category" = 
+    list("High" = ~ paste0(sum(as.numeric(na.omit(.data$APS_Category) == "High")), " (", printpct(round(sum(as.numeric(na.omit(.data$APS_Category) == "High"))/length(na.omit(na.omit(.data$APS_Category)))*100.0, 1) ), ")"  ) ,
+         "Intermediate" = ~ paste0(sum(as.numeric(na.omit(.data$APS_Category) == "Intermediate")), " (", printpct(round(sum(as.numeric(na.omit(.data$APS_Category) == "Intermediate"))/length(na.omit(na.omit(.data$APS_Category)))*100.0, 1) ), ")"  ) ,
+         "Low" = ~ paste0(sum(as.numeric(na.omit(.data$APS_Category) == "Low")), " (", printpct(round(sum(as.numeric(na.omit(.data$APS_Category) == "Low"))/length(na.omit(na.omit(.data$APS_Category)))*100.0, 1) ), ")"  ) 
+         
+         ),
+
+
+        "Blood Abeta 42/40" = 
+    list("mean (sd)" = ~ qwraps2::mean_sd(na.omit(.data$Abeta4240_Plasma_IPMS), denote_sd = "paren", digits = 3),
+         "min" = ~ round(min(na.omit(.data$Abeta4240_Plasma_IPMS)), 3),
+         "max" = ~ round(max(na.omit(.data$Abeta4240_Plasma_IPMS)), 3)
+         ),
+    
+        "Blood Aβ40" = 
+    list("mean (sd)" = ~ qwraps2::mean_sd(na.omit(.data$Abeta40_Plasma_IPMS), denote_sd = "paren", digits = 1),
+         "min" = ~ round(min(na.omit(.data$Abeta40_Plasma_IPMS)), digits = 1),
+         "max" = ~ round(max(na.omit(.data$Abeta40_Plasma_IPMS)), digits = 1)
+         ),
+    
+        "Blood Aβ42" = 
+    list("mean (sd)" = ~ qwraps2::mean_sd(na.omit(.data$Abeta42_Plasma_IPMS), denote_sd = "paren", digits = 1),
+         "min" = ~ round(min(na.omit(.data$Abeta42_Plasma_IPMS)), digits = 1),
+         "max" = ~ round(max(na.omit(.data$Abeta42_Plasma_IPMS)), digits = 1)
+         )
+        
+  )
+
+
+
+# Show data for all subjects
+c = summary_table(study138data, demographics_table)
+
+colnames(c) = gsub("x", "-", colnames(c))
+
+c
+
+```
+
+
+## APS histogram
+
+```{r}
+ggplot(study138data, aes(x=APS)) + 
+  geom_histogram(aes(y=..density..),fill="dodgerblue3",color="white",alpha=0.7, binwidth = 5) + 
+  geom_density() +
+  geom_rug() +
+  geom_vline(xintercept = 35.5) +
+  geom_vline(xintercept = 57.5) +
+  labs(x='Abeta4240_Plasma_IPMS') +
+  theme_minimal()
+
+```
+
+## Age histogram
+
+```{r}
+
+ggplot(study138data, aes(x=age)) + 
+  geom_histogram(aes(y=..density..),fill="dodgerblue3",color="white",alpha=0.7, binwidth = 1) + 
+  geom_density() +
+  geom_rug() +
+  labs(x='Abeta4240_Plasma_IPMS') +
+  annotate("text", x=mean(study138data$age), y=0.02, label = paste0("mean = ", round(mean(study138data$age), 3))) +
+  theme_minimal()
+
+```
+
+
+
+## Abeta histograms
+
+```{r}
+ggplot(study138data, aes(x=Abeta4240_Plasma_IPMS)) + 
+  geom_histogram(aes(y=..density..),fill="dodgerblue3",color="white",alpha=0.7, binwidth = 0.005) + 
+  geom_density() +
+  geom_rug() +
+  geom_vline(xintercept = 0.089) +
+  labs(x='Abeta4240_Plasma_IPMS') +
+  annotate("text", x=mean(study138data$Abeta4240_Plasma_IPMS), y=20, label = paste0("mean = ", round(mean(study138data$Abeta4240_Plasma_IPMS), 3))) +
+  theme_minimal()
+
+ggplot(study138data, aes(x=Abeta40_Plasma_IPMS)) + 
+  geom_histogram(aes(y=..density..),fill="dodgerblue3",color="white",alpha=0.7, binwidth = 50) + 
+  geom_density() +
+  geom_rug() +
+  labs(x='Abeta40_Plasma_IPMS') +
+  annotate("text", x=mean(study138data$Abeta40_Plasma_IPMS), y=0.0025, label = paste0("mean = ", round(mean(study138data$Abeta40_Plasma_IPMS), 3))) +
+  theme_minimal()
+
+ggplot(study138data, aes(x=Abeta42_Plasma_IPMS)) + 
+  geom_histogram(aes(y=..density..),fill="dodgerblue3",color="white",alpha=0.7, binwidth = 5) + 
+  geom_density() +
+  geom_rug() +
+  labs(x='Abeta42_Plasma_IPMS') +
+  annotate("text", x=mean(study138data$Abeta42_Plasma_IPMS), y=0.025, label = paste0("mean = ", round(mean(study138data$Abeta42_Plasma_IPMS), 3))) +
+  theme_minimal()
+
+
+```
+
+## Abeta histograms - by batch
+
+
+```{r}
+ggplot(study138data, aes(x=Abeta4240_Plasma_IPMS, color = as.factor(batch))) + 
+  geom_histogram(aes(y=..density..),fill="dodgerblue3",color="white",alpha=0.7, binwidth = 0.005) + 
+  geom_density() +
+  geom_rug() +
+  labs(x='Abeta4240_Plasma_IPMS') +
+  theme_minimal()
+
+ggplot(study138data, aes(x=Abeta40_Plasma_IPMS, color = as.factor(batch))) + 
+  geom_histogram(aes(y=..density..),fill="dodgerblue3",color="white",alpha=0.7, binwidth = 50) + 
+  geom_density() +
+  geom_rug() +
+  labs(x='Abeta40_Plasma_IPMS') +
+  theme_minimal()
+
+ggplot(study138data, aes(x=Abeta42_Plasma_IPMS, color = as.factor(batch))) + 
+  geom_histogram(aes(y=..density..),fill="dodgerblue3",color="white",alpha=0.7, binwidth = 5) + 
+  geom_density() +
+  geom_rug() +
+  labs(x='Abeta42_Plasma_IPMS') +
+  theme_minimal()
+
+
+```
+
+## Abeta averages tracking by batch
+
+
+```{r}
+
+ggplot(study138data, aes(x=batch, y=Abeta4240_Plasma_IPMS, color = as.factor(batch))) + 
+  geom_boxplot() +
+  labs(y='Abeta4240_Plasma_IPMS', x = "Batch") +
+  theme_minimal()
+
+ggplot(study138data, aes(x=batch, y=Abeta40_Plasma_IPMS, color = as.factor(batch))) + 
+  geom_boxplot() +
+  labs(y='Abeta40_Plasma_IPMS', x = "Batch") +
+  theme_minimal()
+
+ggplot(study138data, aes(x=batch, y=Abeta42_Plasma_IPMS, color = as.factor(batch))) + 
+  geom_boxplot() +
+  labs(y='Abeta42_Plasma_IPMS', x = "Batch") +
+  theme_minimal()
+
+```
+
+
+
+# Get data ready for export
+
+
+
+## Convert data from wide to long format
+
+Test codes:
+
++---------------+------------------------------------+----------------+
+| LBTESTCD      | LBTEST                             | LBORRESU       |
++===============+====================================+================+
+| AB42          | PLASMA ABETA42                     | pg/mL          |
++---------------+------------------------------------+----------------+
+| AB40          | PLASMA ABETA40                     | pg/mL          |
++---------------+------------------------------------+----------------+
+| AB4240        | ABETA42/40 RATIO                   |                |
+|               |                                    |                |
+|               | Provided as 3 decimal point        |                |
+|               | precision (eg. 0.090)              |                |
++---------------+------------------------------------+----------------+
+| APS           | AMYLOID PROBABILITY SCORE          |                |
+|               |                                    |                |
+|               | Integer between 0 and 100 (both    |                |
+|               | inclusive)                         |                |
++---------------+------------------------------------+----------------+
+| APOE          | APOE PROTEOTYPE                    |                |
++---------------+------------------------------------+----------------+
+
+```{r}
+
+# 1) Keep just the data we report
+study138data.export = study138data[, c("USUBJID", "LBREFID", "LBSTAT", "LBREASND", "Abeta40_Plasma_IPMS", "Abeta42_Plasma_IPMS", "Abeta4240_Plasma_IPMS", "APS", "Proteotype")]
+colnames(study138data.export) = c("USUBJID", "LBREFID", "LBSTAT", "LBREASND", "AB40", "AB42", "AB4240", "APS", "APOE")
+
+# 1.1) Round the ratio to 3 sig digits
+study138data.export$AB4240 = round(study138data.export$AB4240, 3)
+
+# 1.2) GENOPYE SHOULD BE _ not /
+study138data.export$APOE = gsub('/', '_', study138data.export$APOE)
+
+# 2) Convert to long format
+study138data.export.long = melt(study138data.export, id.vars = c("USUBJID","LBREFID", "LBSTAT", "LBREASND"), variable.name = "LBTESTCD", value.name = "LBORRES")
+
+# 3) Sort by USUBJID & LBREFID
+study138data.export.long = study138data.export.long[
+  with(study138data.export.long, order(USUBJID, LBREFID)),
+]
+
+formattable(head(study138data.export.long, n = 10))
+
+# For samples missing age data (APS = -1) - fill in LBSTAT, LBREASND then change LBORRES to ""
+study138data.export.long[which(study138data.export.long$LBORRES == -1 & study138data.export.long$LBSTAT == "" & study138data.export.long$LBTESTCD == "APS"), "LBSTAT"] = "ND"
+study138data.export.long[which(study138data.export.long$LBORRES == -1 & study138data.export.long$LBREASND == "" & study138data.export.long$LBTESTCD == "APS"), "LBREASND"] = "Patient age missing or low"
+study138data.export.long[which(study138data.export.long$LBORRES == -1 & study138data.export.long$LBTESTCD == "APS"), "LBORRES"] = ""
+
+
+# For QNS samples all the results are NA - but they do not want NA in the LBORRES column so we will change all NA to ""
+study138data.export.long[which(is.na(study138data.export.long$LBORRES)), "LBORRES"] = "" 
+  
+```
+
+## Add the other fields to the export file
+
+Order of fields in the output file:
+
+| Field Name | Value       |
+|------------|-------------|
+| STUDYID    | "TRCPAD"    |
+| DOMAIN     | "LB"        |
+| SITE       | ""          |
+| USUBJID    | dynamic     |
+| LBNAM      | "C2N"       |
+| LBREFID    | dynamic     |
+| VISIT      | "sc1"       |
+| LBDTC      | ""          |
+| LBSPEC     | "PLASMA"    |
+| LBCAT      | "BIOMARKER" |
+| LBTESTCD   | dynamic     |
+| LBORRES    | dynamic     |
+| LBORRESU   | per above   |
+| LBMETHOD   | "LC-MS/MS"  |
+| LBSTAT     | dynamic     |
+| LBREASND   | dynamic     |
+
+
+```{r}
+# STATIC ONES FIRST:
+study138data.export.long$STUDYID  = "TRCPAD"
+study138data.export.long$DOMAIN   = "LB"
+study138data.export.long$SITE     = ""
+study138data.export.long$LBNAM    = "C2N" 
+study138data.export.long$VISIT    = "sc1"
+study138data.export.long$LBDTC    = ""
+study138data.export.long$LBSPEC   = "PLASMA"  
+study138data.export.long$LBCAT    = "BIOMARKER"
+study138data.export.long$LBMETHOD = "LC-MS/MS"
+#study138data.export.long$LBSTAT   = ""
+#study138data.export.long$LBREASND = ""  
+
+# UNIT DEPENDS ON LBTESTCD
+study138data.export.long$LBORRESU = "" 
+study138data.export.long$LBORRESU[which(study138data.export.long$LBTESTCD == "AB42" | study138data.export.long$LBTESTCD == "AB40")] = "pg/mL"
+
+
+
+```
+
+
+```{r}
+
+# ORDER THE COLUMNS
+col_order <- c("STUDYID", "DOMAIN", "SITE", "USUBJID", "LBNAM", "LBREFID", "VISIT", "LBDTC", "LBSPEC", "LBCAT", "LBTESTCD", "LBORRES", "LBORRESU", "LBMETHOD", "LBSTAT", "LBREASND")
+study138data.export.long.sort = study138data.export.long[, ..col_order]
+
+formattable(head(study138data.export.long.sort, n = 10), row.names=FALSE)
+  
+```
+
+
+
+Number of samples in final file:
+
+```{r}
+
+length(study138data$LBREFID)
+
+```
+
+Number of lines in the long export file divided by 5 since there are 5 results per sample.
+
+```{r}
+
+length(study138data.export.long.sort$USUBJID)/5
+
+```
+
+
+
+```{r}
+
+# Filenaming convention:
+
+## TEST
+# TRCPAD_TEST_C2N_BM_FULL_YYYYMMDDX.csv
+
+## PROD
+# TRCPAD_PROD_C2N_BM_FULL_YYYYMMDDX.csv
+
+currentDate = format(Sys.Date(), "%Y%m%d") 
+filename = paste0("TRCPAD_PROD_C2N_BM_FULL_", currentDate, "1.csv")
+
+write.csv(study138data.export.long.sort, filename, row.names=FALSE)
+
+```
+
+
+```{r message=FALSE}
+
+message(paste0("Data export saved to: ", filename))
+message(paste0("Time to run this code: ", difftime(Sys.time(), now)))
+
+```
+
+

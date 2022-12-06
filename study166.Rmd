@@ -1,0 +1,257 @@
+---
+title: "STUDY149: DRAFT Interim Data Analysis"
+author: "C2N Diagnostics - proprietary and confidential information. Not to be copied or distributed without C2N written consent."
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: default
+    toc: true
+    toc_float: true
+    number_sections: true
+
+---
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+
+now <<- Sys.time()
+
+library(ggplot2)
+library(pROC)
+library(data.table)
+library(caret)
+library(plyr)
+library(dplyr)
+library(ggpubr)
+library(expss)
+library(ggforce)
+library(gridExtra)
+# visualizing the effects of variables in a GLM
+library(effects)
+library(Matrix)
+library(readxl)
+library(tidyr)
+library(stringr)
+
+library(DiagrammeR)
+#http://rich-iannone.github.io/DiagrammeR/graphviz_and_mermaid.html
+#https://bookdown.org/yihui/rmarkdown-cookbook/diagrams.html
+
+library(usmap)
+
+library(formattable)
+#library(tidyr)
+
+library(gridExtra)
+library(qwraps2)
+options(qwraps2_markup = "markdown")
+
+
+printpct = function(percentage) {
+  if (percentage > 0)
+    return(paste0(percentage, "%"))
+  else
+    return("-")
+}
+
+# Plot & visualization
+theme_new <- function(base_size = 12, base_family = ""){
+  theme_bw(base_size = base_size, base_family = base_family) %+replace%
+    theme(
+      legend.key=element_rect(colour=NA, fill =NA),
+      panel.grid = element_blank(),   
+      panel.border = element_rect(fill = NA, colour = "black", size=1),
+      panel.background = element_rect(fill = "white", colour = "black"), 
+      strip.background = element_rect(fill = NA)
+    )
+}
+theme_set(theme_new(base_size = 16))
+
+categorize_aps = function (APS) {
+  
+  if (is.na(APS)) {
+    return(NA)
+  }
+  
+  if (APS <= 35) {
+    return("Low")
+  } else if (APS >= 58) {
+    return("High")
+  } else {
+    return("Intermediate")
+  }
+  
+}
+
+
+folder = "Manifests/"
+
+filenames = dir(folder, pattern = "xlsx", full.names = F, ignore.case = TRUE)
+
+manifest_data = data.frame()
+
+for (filename in filenames) {
+  
+  manifest_data_vals = read_excel(paste0(folder, filename), skip =6)
+  manifest_data_vals$batchdate = substr(filename, 41, 50)
+  manifest_data = rbind(manifest_data, manifest_data_vals)
+}
+
+study166AbetaData = read_excel("Abeta Data/All Abeta Data.xlsx", col_types = c("text", "numeric", "numeric", "numeric", "text", "text", "numeric", "text", "numeric", "text"))
+colnames(study166AbetaData)=c("Plasma Barcodes", "Abeta40_Plasma_IPMS", "Abeta42_Plasma_IPMS", "Abeta4240_Plasma_IPMS", "Abeta_comment", "LBDTC", "Year of Birth", "LBREFID", "Batch #", "Run Date")
+
+study166ApoEData = read_excel("ApoE Data/All ApoE Data.xlsx", col_types = c("text", "text", "text"))
+colnames(study166ApoEData)=c("Plasma Barcodes", "Proteotype", "ApoE_comment")
+
+colnames(manifest_data)=c("sequence", "LBREFID", "USUBJID_long", "Year of Birth", "Gender", "LBDTC", "Time of Collection", "Approximate Volume", "Box Number", "Box Position", "Comments", "batchdate")
+
+manifest_data$matchcol = substring(manifest_data$LBREFID, 1, nchar(manifest_data$LBREFID)-3)
+
+manifest_data$`LBDTC` = format(manifest_data$`LBDTC`, "%Y-%m-%d")
+
+manifest_data[c('mon', 'day', 'Year of Birth')]<-str_split_fixed(manifest_data$`Year of Birth`, '/', 3)
+
+manifest_data$`Year of Birth` = as.numeric(manifest_data$`Year of Birth`)
+
+manifest_data[c('USUBJID', 'leftover')] <-str_split_fixed(manifest_data$USUBJID_long, ',', 2)
+
+Abeta_Subset = study166AbetaData[, c("Plasma Barcodes", "Abeta40_Plasma_IPMS", "Abeta42_Plasma_IPMS", "Abeta4240_Plasma_IPMS", "Abeta_comment", "LBREFID")]
+
+Abeta_Subset$matchcol = substring(Abeta_Subset$LBREFID, 1, nchar(Abeta_Subset$LBREFID)-3)
+
+manifest_subset = manifest_data[, c("matchcol", "USUBJID", "Year of Birth", "LBDTC")]
+
+#manifest_subset$matchcol = substring(manifest_subset$LBREFID, 1, nchar(manifest_subset$LBREFID)-3)
+
+Mass_Data = merge(x=Abeta_Subset, y=study166ApoEData, by = "Plasma Barcodes")
+
+study166data = merge(x=Mass_Data, y=manifest_subset, by = "matchcol")
+
+study166data$LBSTAT   = ""
+study166data$LBREASND = "" 
+
+sampleswithqns = which(!is.na(study166data$Abeta_comment) | !is.na(study166data$ApoE_comment))
+
+paste0("Number of samples: ", length(study166data$LBREFID), ", samples with comments: ", length(sampleswithqns))
+
+study166data[sampleswithqns, c("Abeta40_Plasma_IPMS", "Abeta42_Plasma_IPMS", "Abeta4240_Plasma_IPMS", "Proteotype")] = NA
+
+# Set status and reason not done
+study166data[sampleswithqns, c("LBSTAT")] = "ND"
+
+# convert NA back to ""
+study166data$Abeta_comment[is.na(study166data$Abeta_comment)] = ""
+study166data$ApoE_comment[is.na(study166data$ApoE_comment)] = ""
+
+# use the comment as the reason not done
+study166data$LBREASND = paste(study166data$Abeta_comment, study166data$ApoE_comment, sep = "")
+study166data$LBREASND = substr(study166data$LBREASND,1,200)
+
+study166data$LBREFID = substr(study166data$LBREFID, 1, 9)
+
+study166data$age = year(study166data$"LBDTC") - study166data$"Year of Birth"
+
+# count apoE4 alleles
+study166data$apoe4copynr = 0
+study166data$apoe4copynr[is.na(study166data$Proteotype)] = NA
+study166data$apoe4copynr[study166data$Proteotype == "E2/E4"] = 1
+study166data$apoe4copynr[study166data$Proteotype == "E3/E4"] = 1
+study166data$apoe4copynr[study166data$Proteotype == "E4/E4"] = 2
+# E4 presence
+study166data$apoe4present = (study166data$apoe4copynr > 0)
+
+# count apoE2 alleles
+study166data$apoe2copynr = 0
+study166data$apoe2copynr[is.na(study166data$Proteotype)] = NA
+study166data$apoe2copynr[study166data$Proteotype == "E2/E2"] = 2
+study166data$apoe2copynr[study166data$Proteotype == "E2/E3"] = 1
+study166data$apoe2copynr[study166data$Proteotype == "E2/E4"] = 1
+# E2 presence
+study166data$apoe2present = (study166data$apoe2copynr > 0)
+
+
+```
+
+
+
+# APS Calculation
+
+Load CLIA model and calculate APS result for all patients
+
+```{r}
+
+# Load the model
+model = readRDS("model.clia3_25.rds")
+
+
+# Calculate the response of the model given the new data
+study166data$APS = round(predict(model, newdata = study166data, type='response') * 100)
+
+# Assign category
+study166data$APS_Category = sapply(study166data$APS, categorize_aps)
+
+
+hist(study166data$APS )
+
+```
+
+```{r}
+table(study166data$APS_Category)
+```
+
+```{r}
+
+table(study166data$Proteotype)
+
+```
+```{r}
+# Keep just the data we report
+study166data.export = study166data[, c("USUBJID", "LBREFID", "LBSTAT", "LBREASND", "LBDTC", "Abeta40_Plasma_IPMS", "Abeta42_Plasma_IPMS", "Abeta4240_Plasma_IPMS", "APS", "Proteotype")]
+colnames(study166data.export) = c("USUBJID", "LBREFID", "LBSTAT", "LBREASND", "LBDTC", "AB40", "AB42", "AB4240_RATIO", "APS", "APOE")
+
+# Convert to long format
+study166data.export.long = melt(study166data.export, id.vars = c("USUBJID","LBREFID", "LBSTAT", "LBREASND", "LBDTC"), variable.name = "LBTESTCD", value.name = "LBORRES")
+
+# Sort by USUBJID & LBREFID
+study166data.export.long = study166data.export.long[
+  with(study166data.export.long, order(USUBJID, LBREFID)),
+]
+
+# For samples missing age data (APS = -1) - fill in LBSTAT, LBREASND then change LBORRES to ""
+study166data.export.long[which(study166data.export.long$LBORRES == -1 & study166data.export.long$LBSTAT == "" & study166data.export.long$LBTESTCD == "APS"), "LBSTAT"] = "ND"
+study166data.export.long[which(study166data.export.long$LBORRES == -1 & study166data.export.long$LBREASND == "" & study166data.export.long$LBTESTCD == "APS"), "LBREASND"] = "Patient age missing"
+study166data.export.long[which(study166data.export.long$LBORRES == -1 & study166data.export.long$LBTESTCD == "APS"), "LBORRES"] = ""
+
+study166data.export.long$STUDYID = "AlzMatch"
+study166data.export.long$DOMAIN = "LB"
+study166data.export.long$SITE = ""
+study166data.export.long$LBNAM = "C2N"
+study166data.export.long$VISIT = "sc1"
+study166data.export.long$LBSPEC = "PLASMA"
+study166data.export.long$LBCAT = "BIOMARKER"
+study166data.export.long$LBMETHOD = "LC-MS/MS"
+
+# For QNS samples all the results are NA - but they do not want NA in the LBORRES column so we will change all NA to ""
+study166data.export.long[which(is.na(study166data.export.long$LBORRES)), "LBORRES"] = "" 
+
+study166data.export.long$LBORRESU = "" 
+study166data.export.long$LBORRESU[which(study166data.export.long$LBTESTCD == "AB42" | study166data.export.long$LBTESTCD == "AB40")] = "pg/mL"
+
+
+```
+
+# Export
+
+```{r}
+# ORDER THE COLUMNS
+col_order = c("STUDYID", "DOMAIN", "SITE", "USUBJID", "LBNAM", "LBREFID", "VISIT", "LBDTC", "LBSPEC", "LBCAT", "LBTESTCD", "LBORRES", "LBORRESU", "LBMETHOD", "LBSTAT", "LBREASND")
+study166data.export.long.sort = study166data.export.long[, ..col_order]
+
+currentDate = format(Sys.Date(), "%Y%m%d")
+filename = paste0("ALZMATCH_PROD_C2N_BM_FULL_", currentDate, "1.csv")
+write.csv(study166data.export.long.sort, filename, row.names = FALSE)
+
+```
