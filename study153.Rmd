@@ -94,68 +94,46 @@ categorize_eligibility  = function (APS) {
 
 
 folder = "Manifests/"
-
 filenames = dir(folder, pattern = "csv", full.names = F, ignore.case = TRUE)
-
 manifest_data = data.frame()
-
 for (filename in filenames) {
-  
   manifest_data_vals = read.csv(paste0(folder, filename))
-  #manifest_data_vals$batchdate = substr(filename, 41, 50)
   manifest_data = rbind(manifest_data, manifest_data_vals)
 }
+
 #Change name of input Abeta file
-study153AbetaData = read.csv("Abeta Data/PRECIVITYAbetaReport_Sheet1_20221116114658.csv", skip=7)#, col_types = c("text", "text", "text", "text", "text", "text", "text", "text", "text", "text", "numeric", "text", "numeric", "numeric", "text", "numeric", "text", "text", "text", "numeric"))
+study153AbetaData = read.csv("Abeta Data/PRECIVITYAbetaReport_Sheet1_20221207124351.csv", skip=7)
 colnames(study153AbetaData)=c("Sample Raw File Name", "Sample Type", "ID", "Sample Name", "Sample Vial Position", "Sample Level", "Sample Acquisition Date", "Compound Name", "Compound Type", "Integration Mode", "Retention Time", "Theoretical Amount", "Calculated Amount", "Peak Area", "ISTD Area", "ISTD Actual Rt", "All Flag Details", "Excluded", "Exclusion Reason", "Dilution Factor")
 
 #Change name of input ApoE file
-study153ApoEData = read.csv("ApoE Data/2022-11-16_results.csv")#, col_types = c("numeric", "numeric", "text", "text", "numeric", "numeric", "numeric", "text", "numeric", "text", "numeric", "text", "numeric", "text", "numeric", "text", "numeric", "text", "numeric", "text", "numeric", "text"))
+study153ApoEData = read.csv("ApoE Data/2022-12-07_results.csv")
 colnames(study153ApoEData)=c("", "LBREFID", "Proteotype")
 
 colnames(manifest_data)=c("Protocol Name", "Date of Birth", "SUBJID", "Site Number", "LBREFID", "VISIT", "Visit Type", "LBDTC", "Collection Time", "Tube Comments")
 
-Abeta_Big_Subset = study153AbetaData[, c('Sample Raw File Name', 'Compound Name', 'Calculated Amount')]
-
-Abeta_Subset = Abeta_Big_Subset[grepl("Abeta_Study153",Abeta_Big_Subset$`Sample Raw File Name`),]
-
-ApoE_Subset = study153ApoEData[, c('LBREFID', 'Proteotype')]
-
+Abeta_Subset = study153AbetaData[grepl("153_",Abeta_Big_Subset$`Sample Raw File Name`), c('Sample Raw File Name', 'Compound Name', 'Calculated Amount')]
 Abeta_Wide = spread(Abeta_Subset, 'Compound Name', 'Calculated Amount')
+Abeta_Wide$LBREFID = substring(Abeta_Wide$`Sample Raw File Name`, nchar(Abeta_Wide$`Sample Raw File Name`)-10, nchar(Abeta_Wide$`Sample Raw File Name`))
+Abeta_Data = Abeta_Wide[c('LBREFID', 'Abeta_40', 'Abeta_42')]
+colnames(Abeta_Data)=c("LBREFID", "Abeta40_Plasma_IPMS", "Abeta42_Plasma_IPMS")
 
-Abeta_Wide[c('sub1', 'sub2', 'sub3', 'LBREFID')] <-str_split_fixed(Abeta_Wide$`Sample Raw File Name`, '_', 4)
-
-Abeta = Abeta_Wide[c('LBREFID', 'Abeta_40', 'Abeta_42')]
-
-colnames(Abeta)=c("LBREFID", "Abeta40_Plasma_IPMS", "Abeta42_Plasma_IPMS")
-
-#manifest_data$`LBDTC` = format(manifest_data$`LBDTC`, "%Y-%m-%d")
+ApoE_Data = study153ApoEData[, c('LBREFID', 'Proteotype')]
 
 manifest_data$"Year of Birth" = substring(manifest_data$`Date of Birth`, nchar(manifest_data$`Date of Birth`)-1, nchar(manifest_data$`Date of Birth`))
 manifest_data$`Year of Birth` = as.numeric(manifest_data$`Year of Birth`)
 manifest_data$`Year of Birth` = manifest_data$`Year of Birth` + 1900
-
 manifest_data$"Year of Collection" = substring(manifest_data$LBDTC, nchar(manifest_data$LBDTC)-1, nchar(manifest_data$LBDTC))
 manifest_data$`Year of Collection` = as.numeric(manifest_data$`Year of Collection`)
 manifest_data$`Year of Collection` = manifest_data$`Year of Collection` + 2000
-
 manifest_data$age = manifest_data$"Year of Collection" - manifest_data$"Year of Birth"
-
-#manifest_data[c('USUBJID', 'leftover')] <-str_split_fixed(manifest_data$USUBJID_long, ',', 2)
-
 manifest_subset = manifest_data[, c("Year of Birth", "SUBJID", "LBREFID", "VISIT", "LBDTC", "age")]
 
-#manifest_subset$matchcol = substring(manifest_subset$LBREFID, 1, nchar(manifest_subset$LBREFID)-3)
-
-Mass_Data = merge(x=Abeta, y=ApoE_Subset, by = "LBREFID", all.x = TRUE)
-
+Mass_Data = merge(x=Abeta_Data, y=ApoE_Data, by = "LBREFID", all.x = TRUE)
 study153data = merge(x=Mass_Data, y=manifest_subset, by = "LBREFID")
 
 study153data$Abeta40_Plasma_IPMS = as.numeric(study153data$Abeta40_Plasma_IPMS)
 study153data$Abeta42_Plasma_IPMS = as.numeric(study153data$Abeta42_Plasma_IPMS)
-
-
-study153data$STAT   = ""
+study153data$STAT = ""
 study153data$REASND = "" 
 
 # Calculate ratio
